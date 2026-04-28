@@ -1,4 +1,6 @@
-FROM caddy:2 AS caddy-src
+FROM caddy:2-builder AS caddy-builder
+COPY prod/botshed /src/botshed
+RUN xcaddy build --with explainshell.com/botshed=/src/botshed
 
 FROM python:3.12-slim
 
@@ -6,7 +8,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends wget zstd jq \
   && rm -rf /var/lib/apt/lists/*
 
-COPY --from=caddy-src /usr/bin/caddy /usr/local/bin/caddy
+COPY --from=caddy-builder /usr/bin/caddy /usr/local/bin/caddy
 
 WORKDIR /opt/webapp
 COPY requirements.txt .

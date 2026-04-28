@@ -23,9 +23,12 @@ e2e-update:
 test-llm:
 	RUN_LLM_TESTS=1 pytest tests/extraction/llm/test_extractor.py::test_real_llm_echo_manpage -v
 
-tests-all: lint tests e2e
+botshed-test:
+	cd prod/botshed && go vet ./... && go test ./...
 
-tests-quick: lint tests
+tests-all: lint tests botshed-test e2e
+
+tests-quick: lint tests botshed-test
 
 lint:
 	ruff check explainshell tests tools
@@ -99,4 +102,4 @@ deploy-local:
 	 doctl apps update "$$DO_APP_ID" --spec "$$tmp"; \
 	 doctl apps create-deployment "$$DO_APP_ID" --force-rebuild --wait
 
-.PHONY: tests e2e e2e-db e2e-update test-llm tests-all tests-quick lint serve db-check ubuntu-archive arch-archive download-latest-db upload-live-db deploy-local
+.PHONY: tests e2e e2e-db e2e-update test-llm tests-all tests-quick lint serve db-check ubuntu-archive arch-archive download-latest-db upload-live-db deploy-local botshed-test

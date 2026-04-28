@@ -6,4 +6,5 @@
 !requirements.txt
 !prod/docker/Caddyfile
 !prod/docker/start.sh
+!prod/botshed/
 !tools/download-latest-db.sh

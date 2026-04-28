@@ -3,6 +3,11 @@
 	admin off
 	persist_config off
 
+	# botshed isn't a builtin handler so caddy needs an explicit slot
+	# in the handler chain; "before reverse_proxy" puts it where the
+	# `handle` block expects it.
+	order botshed before reverse_proxy
+
 	# Trust the platform's private network so caddy preserves
 	# X-Forwarded-Proto/For/Host from the edge instead of overwriting them.
 	# Without this, caddy sets X-Forwarded-Proto=http (its own hop is
@@ -75,7 +80,11 @@
 	}
 
 	handle {
-		reverse_proxy [::1]:8081 {
+		botshed {
+			db_path {env.DB_PATH}
+			upstream {env.UPSTREAM_ADDR}
+		}
+		reverse_proxy {env.UPSTREAM_ADDR} {
 			# 256 KB covers the ~67 KB worst-case explain response.
 			response_buffers 256KB
 			transport http {

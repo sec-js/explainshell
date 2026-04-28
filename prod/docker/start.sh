@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Single source of truth for the gunicorn bind / caddy upstream pair.
+export UPSTREAM_ADDR="${UPSTREAM_ADDR:-[::1]:8081}"
+
 # Caddy fronts gunicorn on :8080 and buffers responses so slow-read clients
 # cannot park gthread workers in wsgi.write(). Gunicorn binds localhost only.
 # Access logging lives in caddy (structured json with real client_ip from the
@@ -10,7 +13,7 @@ set -e
 gunicorn -w 2 --threads 4 \
   --timeout 15 --graceful-timeout 5 \
   --max-requests 10000 --max-requests-jitter 2000 --preload \
-  -b [::1]:8081 \
+  -b "$UPSTREAM_ADDR" \
   "explainshell.web:create_app()" &
 GUNI_PID=$!
 
