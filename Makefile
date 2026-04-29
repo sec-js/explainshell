@@ -31,6 +31,7 @@ PROD_IMAGE := explainshell-prod:test
 prod-image:
 	@name=$$(gh api "repos/idank/explainshell/releases/tags/db-latest" \
 	   --jq '[.assets[] | select(.name | test("^explainshell-.*\\.db\\.zst$$"))] | sort_by(.created_at) | last | .name'); \
+	 [ -n "$$name" ] || { echo "could not resolve DB_NAME via gh api (auth?)"; exit 1; }; \
 	 docker build -t $(PROD_IMAGE) -f prod/docker/Dockerfile --build-arg DB_NAME="$$name" .
 
 prod-integration: prod-image

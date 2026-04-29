@@ -40,6 +40,8 @@ jobs:
       - run: npx playwright install --with-deps chromium
 
       - run: make tests-all
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   prod-image:
     name: Build prod image & check size
