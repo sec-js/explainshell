@@ -1,22 +1,6 @@
-# DigitalOcean App Platform spec for explainshell.
-#
-# This is the source of truth for the app's config; `doctl apps update
-# <id> --spec <file>` does a full replace. The deploy workflow
-# (.github/workflows/do-deploy.yml) renders this file with envsubst to
-# fill in ${DB_NAME} and ${GIT_SHA}, then applies it.
-#
-# First-time setup (one-off, manual):
-#   DB_NAME=$(...) GIT_SHA=$(git rev-parse HEAD) envsubst \
-#     < prod/digitalocean/app.yaml > ~/app.yaml
-#   doctl apps create --spec ~/app.yaml
-# Save the returned app id as the DO_APP_ID repo/environment secret.
-# (Snap-installed doctl can't read /tmp — keep the rendered spec under
-# $HOME.)
+# Source of truth for the app config; `doctl apps update --spec` does a full replace.
 name: explainshell
 region: nyc
-# Checked in here because `doctl apps update --spec` does a full replace —
-# anything set via the dashboard and missing from the spec gets wiped on
-# the next CI deploy.
 domains:
   - domain: explainshell.com
     type: PRIMARY
@@ -24,8 +8,6 @@ services:
   - name: web
     dockerfile_path: prod/docker/Dockerfile
     source_dir: /
-    # Forwards stdout/stderr to Better Stack. Token is rendered by
-    # envsubst in CI from the LOGTAIL_TOKEN GitHub secret.
     log_destinations:
       - name: betterstack
         logtail:
@@ -33,16 +15,11 @@ services:
     github:
       repo: idank/explainshell
       branch: master
-      # CI drives deploys (resolves DB_NAME from the db-latest release
-      # and calls `doctl apps update`). Auto-deploy would skip that
-      # step and ship an image with no DB pinning guarantee.
+      # CI deploys pin DB_NAME from the db-latest release; auto-deploy would skip that.
       deploy_on_push: false
     http_port: 8080
-    instance_count: 4
-    # apps-s-1vcpu-1gb: 1 shared vCPU / 1 GiB, professional tier.
-    # Same hardware as basic-xs ($10) but $12/mo, and the basic tier
-    # caps basic-xs at 1 instance — this slug is the cheapest one that
-    # allows instance_count > 1. Mirrors Fly's 1 GiB × 2 layout.
+    instance_count: 2
+    # Cheapest slug that allows instance_count > 1.
     instance_size_slug: apps-s-1vcpu-1gb
     health_check:
       http_path: /health
@@ -63,7 +40,7 @@ services:
       - key: PORT
         value: "8080"
         scope: RUN_TIME
-      # Build args — see Dockerfile. Rendered by envsubst in CI.
+      # Build args, rendered by envsubst in CI.
       - key: DB_NAME
         value: ${DB_NAME}
         scope: BUILD_TIME
