@@ -12,7 +12,6 @@ from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
-from explainshell.errors import ExtractionError, SkippedExtraction
 from explainshell.extraction import ExtractorConfig
 from explainshell.extraction.llm.providers import BatchResults, TokenUsage
 from explainshell.extraction.manifest import BatchManifest
@@ -288,87 +287,113 @@ class TestBatchPerBatchDbWrites(unittest.TestCase):
 
 
 class TestLlmManagerDryRun(unittest.TestCase):
-    """Tests for --dry-run: extractor is called, DB is not written."""
+    """Tests for --dry-run: classifier runs, no extraction, no DB writes."""
 
+    @patch("explainshell.extraction.common.gz_sha256", return_value="h")
+    @patch("os.path.islink", return_value=False)
+    @patch("explainshell.manager.run")
     @patch("explainshell.manager.make_extractor")
-    @patch("explainshell.manager.store.Store.create")
     @patch("explainshell.util.collect_gz_files")
     @patch(
-        "explainshell.manager.config.source_from_path", return_value="fake/echo.1.gz"
+        "explainshell.manager.config.source_from_path",
+        return_value="fake/release/1/echo.1.gz",
     )
-    def test_dry_run_calls_llm_but_not_store(
-        self, mock_source, mock_collect, mock_store_create, mock_make_ext
+    def test_dry_run_classifies_without_extracting(
+        self,
+        _mock_source,
+        mock_collect,
+        mock_make_ext,
+        mock_run,
+        _mock_link,
+        _mock_sha,
     ):
         mock_collect.return_value = ["/fake/echo.1.gz"]
-        fake_result = MagicMock()
-        fake_result.outcome = ExtractionOutcome.SUCCESS
-        fake_result.mp.options = [MagicMock(), MagicMock()]
-        fake_result.stats = ExtractionStats(elapsed_seconds=0)
-        mock_ext = MagicMock()
-        mock_ext.extract.return_value = fake_result
-        mock_make_ext.return_value = mock_ext
+        with _temp_db() as db_path:
+            Store.create(db_path).close()
+            runner = CliRunner()
+            # Local override of the conftest autouse patch so we can inspect calls.
+            with (
+                patch("explainshell.manager._attach_run_log") as mock_attach,
+                self.assertLogs("explainshell.manager", level="INFO") as cm,
+            ):
+                result = runner.invoke(
+                    cli,
+                    [
+                        "--db",
+                        db_path,
+                        "extract",
+                        "--mode",
+                        "llm:test-model",
+                        "--dry-run",
+                        "/fake/echo.1.gz",
+                    ],
+                )
 
-        runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            ["extract", "--mode", "llm:test-model", "--dry-run", "/fake/echo.1.gz"],
-        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_make_ext.assert_not_called()
+        mock_run.assert_not_called()
+        mock_attach.assert_not_called()
+        msgs = "\n".join(cm.output)
+        self.assertIn("WORK", msgs)
+        self.assertIn("fake/release/1/echo.1.gz", msgs)
+        self.assertIn("plan:", msgs)
 
-        mock_ext.extract.assert_called_once_with("/fake/echo.1.gz")
-        mock_store_create.assert_not_called()
-        self.assertEqual(result.exit_code, 0)
-
-    @patch("explainshell.manager.make_extractor")
-    @patch("explainshell.manager.store.Store.create")
+    @patch("explainshell.extraction.common.gz_sha256", return_value="h")
+    @patch("os.path.islink", return_value=False)
     @patch("explainshell.util.collect_gz_files")
     @patch(
-        "explainshell.manager.config.source_from_path", return_value="fake/echo.1.gz"
+        "explainshell.manager.config.source_from_path",
+        return_value="fake/release/1/echo.1.gz",
     )
-    def test_dry_run_skipped_file_returns_success(
-        self, mock_source, mock_collect, mock_store_create, mock_make_ext
+    def test_dry_run_reports_already_stored(
+        self, _mock_source, mock_collect, _mock_link, _mock_sha
     ):
-        """Skipped files are not failures — return code should be 0."""
         mock_collect.return_value = ["/fake/echo.1.gz"]
+        with _temp_db() as db_path:
+            pre = Store.create(db_path)
+            pre.add_manpage(
+                _make_manpage("echo", distro="fake", release="release"), _make_raw()
+            )
+            pre.close()
 
-        mock_ext = MagicMock()
-        mock_ext.extract.side_effect = SkippedExtraction("no OPTIONS section")
-        mock_make_ext.return_value = mock_ext
+            runner = CliRunner()
+            with self.assertLogs("explainshell.manager", level="INFO") as cm:
+                result = runner.invoke(
+                    cli,
+                    [
+                        "--db",
+                        db_path,
+                        "extract",
+                        "--mode",
+                        "llm:test-model",
+                        "--dry-run",
+                        "/fake/echo.1.gz",
+                    ],
+                )
 
+        self.assertEqual(result.exit_code, 0, result.output)
+        msgs = "\n".join(cm.output)
+        self.assertIn("ALREADY", msgs)
+        self.assertIn("fake/release/1/echo.1.gz", msgs)
+
+    def test_dry_run_requires_existing_db(self):
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            ["extract", "--mode", "llm:test-model", "--dry-run", "/fake/echo.1.gz"],
-        )
-
-        mock_ext.extract.assert_called_once_with("/fake/echo.1.gz")
-        mock_store_create.assert_not_called()
-        self.assertEqual(result.exit_code, 0)
-
-    @patch("explainshell.manager.make_extractor")
-    @patch("explainshell.manager.store.Store.create")
-    @patch("explainshell.util.collect_gz_files")
-    @patch(
-        "explainshell.manager.config.source_from_path", return_value="fake/echo.1.gz"
-    )
-    def test_dry_run_failed_file_returns_failure(
-        self, mock_source, mock_collect, mock_store_create, mock_make_ext
-    ):
-        """Failed extraction should cause non-zero return code."""
-        mock_collect.return_value = ["/fake/echo.1.gz"]
-
-        mock_ext = MagicMock()
-        mock_ext.extract.side_effect = ExtractionError("parse error")
-        mock_make_ext.return_value = mock_ext
-
-        runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            ["extract", "--mode", "llm:test-model", "--dry-run", "/fake/echo.1.gz"],
-        )
-
-        mock_ext.extract.assert_called_once_with("/fake/echo.1.gz")
-        mock_store_create.assert_not_called()
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_db = os.path.join(tmp, "absent.db")
+            result = runner.invoke(
+                cli,
+                [
+                    "--db",
+                    missing_db,
+                    "extract",
+                    "--mode",
+                    "llm:test-model",
+                    "--dry-run",
+                    "/fake/a.1.gz",
+                ],
+            )
         self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Database not found", result.output)
 
     @patch("explainshell.extraction.common.gz_sha256", side_effect=lambda p: p)
     @patch("explainshell.manager.run")
@@ -2038,32 +2063,6 @@ class TestDbPathValidation(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Database not found", result.output)
 
-    def test_dry_run_without_db(self):
-        """extract --dry-run should not require a DB path."""
-
-        runner = CliRunner()
-        with (
-            patch("explainshell.manager.make_extractor") as mock_ext,
-            patch("explainshell.util.collect_gz_files", return_value=["/fake/a.1.gz"]),
-            patch(
-                "explainshell.manager.config.source_from_path",
-                return_value="fake/a.1.gz",
-            ),
-        ):
-            fake_result = MagicMock()
-            fake_result.outcome = ExtractionOutcome.SUCCESS
-            fake_result.mp.options = []
-            fake_result.stats = ExtractionStats(elapsed_seconds=0)
-            mock_ext.return_value = MagicMock()
-            mock_ext.return_value.extract.return_value = fake_result
-
-            result = runner.invoke(
-                cli,
-                ["extract", "--mode", "llm:test-model", "--dry-run", "/fake/a.1.gz"],
-            )
-
-        self.assertEqual(result.exit_code, 0)
-
 
 # ---------------------------------------------------------------------------
 # TestShowCli — uses real temp DB
@@ -2343,121 +2342,129 @@ class TestDbCheckCli(unittest.TestCase):
 class TestAtFileExpansion(unittest.TestCase):
     """Tests that @file arguments are expanded through the CLI."""
 
-    @patch("explainshell.manager.make_extractor")
-    @patch("explainshell.manager.store.Store.create")
+    @patch("explainshell.extraction.common.gz_sha256", side_effect=lambda p: p)
+    @patch("os.path.islink", return_value=False)
     @patch(
-        "explainshell.manager.config.source_from_path", return_value="fake/echo.1.gz"
+        "explainshell.manager.config.source_from_path",
+        side_effect=lambda p: f"fake/release/1/{os.path.basename(p)}",
     )
     def test_extract_expands_at_file(
         self,
-        mock_source: MagicMock,
-        mock_store_create: MagicMock,
-        mock_make_ext: MagicMock,
+        _mock_source: MagicMock,
+        _mock_link: MagicMock,
+        _mock_sha: MagicMock,
     ) -> None:
-        """@file arg is expanded to the file's contents and passed to extraction."""
-        fake_result = MagicMock()
-        fake_result.outcome = ExtractionOutcome.SUCCESS
-        fake_result.mp.options = [MagicMock()]
-        fake_result.stats = ExtractionStats(elapsed_seconds=0)
-        mock_ext = MagicMock()
-        mock_ext.extract.return_value = fake_result
-        mock_make_ext.return_value = mock_ext
-
+        """@file arg is expanded to the file's contents and reaches the classifier."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("/fake/echo.1.gz\n")
             f.flush()
             list_path = f.name
 
         try:
-            runner = CliRunner()
-            result = runner.invoke(
-                cli,
-                ["extract", "--mode", "llm:test-model", "--dry-run", f"@{list_path}"],
-            )
+            with _temp_db() as db_path:
+                Store.create(db_path).close()
+                runner = CliRunner()
+                with self.assertLogs("explainshell.manager", level="INFO") as cm:
+                    result = runner.invoke(
+                        cli,
+                        [
+                            "--db",
+                            db_path,
+                            "extract",
+                            "--mode",
+                            "llm:test-model",
+                            "--dry-run",
+                            f"@{list_path}",
+                        ],
+                    )
 
             self.assertEqual(result.exit_code, 0, result.output)
-            mock_ext.extract.assert_called_once_with("/fake/echo.1.gz")
+            self.assertIn("fake/release/1/echo.1.gz", "\n".join(cm.output))
         finally:
             os.unlink(list_path)
 
-    @patch("explainshell.manager.make_extractor")
-    @patch("explainshell.manager.store.Store.create")
+    @patch("explainshell.extraction.common.gz_sha256", side_effect=lambda p: p)
+    @patch("os.path.islink", return_value=False)
     @patch(
-        "explainshell.manager.config.source_from_path", return_value="fake/echo.1.gz"
+        "explainshell.manager.config.source_from_path",
+        side_effect=lambda p: f"fake/release/1/{os.path.basename(p)}",
     )
     def test_extract_at_file_skips_blanks_and_comments(
         self,
-        mock_source: MagicMock,
-        mock_store_create: MagicMock,
-        mock_make_ext: MagicMock,
+        _mock_source: MagicMock,
+        _mock_link: MagicMock,
+        _mock_sha: MagicMock,
     ) -> None:
-        fake_result = MagicMock()
-        fake_result.outcome = ExtractionOutcome.SUCCESS
-        fake_result.mp.options = [MagicMock()]
-        fake_result.stats = ExtractionStats(elapsed_seconds=0)
-        mock_ext = MagicMock()
-        mock_ext.extract.return_value = fake_result
-        mock_make_ext.return_value = mock_ext
-
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("/fake/echo.1.gz\n\n# comment\n  \n")
             f.flush()
             list_path = f.name
 
         try:
-            runner = CliRunner()
-            result = runner.invoke(
-                cli,
-                ["extract", "--mode", "llm:test-model", "--dry-run", f"@{list_path}"],
-            )
+            with _temp_db() as db_path:
+                Store.create(db_path).close()
+                runner = CliRunner()
+                with self.assertLogs("explainshell.manager", level="INFO") as cm:
+                    result = runner.invoke(
+                        cli,
+                        [
+                            "--db",
+                            db_path,
+                            "extract",
+                            "--mode",
+                            "llm:test-model",
+                            "--dry-run",
+                            f"@{list_path}",
+                        ],
+                    )
 
             self.assertEqual(result.exit_code, 0, result.output)
-            mock_ext.extract.assert_called_once_with("/fake/echo.1.gz")
+            msgs = "\n".join(cm.output)
+            self.assertIn("fake/release/1/echo.1.gz", msgs)
+            self.assertIn("(1 total)", msgs)
         finally:
             os.unlink(list_path)
 
-    @patch("explainshell.manager.make_extractor")
-    @patch("explainshell.manager.store.Store.create")
+    @patch("explainshell.extraction.common.gz_sha256", side_effect=lambda p: p)
+    @patch("os.path.islink", return_value=False)
     @patch(
-        "explainshell.manager.config.source_from_path", return_value="fake/echo.1.gz"
+        "explainshell.manager.config.source_from_path",
+        side_effect=lambda p: f"fake/release/1/{os.path.basename(p)}",
     )
     def test_extract_mixed_plain_and_at_file(
         self,
-        mock_source: MagicMock,
-        mock_store_create: MagicMock,
-        mock_make_ext: MagicMock,
+        _mock_source: MagicMock,
+        _mock_link: MagicMock,
+        _mock_sha: MagicMock,
     ) -> None:
-        fake_result = MagicMock()
-        fake_result.outcome = ExtractionOutcome.SUCCESS
-        fake_result.mp.options = [MagicMock()]
-        fake_result.stats = ExtractionStats(elapsed_seconds=0)
-        mock_ext = MagicMock()
-        mock_ext.extract.return_value = fake_result
-        mock_make_ext.return_value = mock_ext
-
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("/fake/echo.1.gz\n")
             f.flush()
             list_path = f.name
 
         try:
-            runner = CliRunner()
-            result = runner.invoke(
-                cli,
-                [
-                    "extract",
-                    "--mode",
-                    "llm:test-model",
-                    "--dry-run",
-                    "/fake/other.1.gz",
-                    f"@{list_path}",
-                ],
-            )
+            with _temp_db() as db_path:
+                Store.create(db_path).close()
+                runner = CliRunner()
+                with self.assertLogs("explainshell.manager", level="INFO") as cm:
+                    result = runner.invoke(
+                        cli,
+                        [
+                            "--db",
+                            db_path,
+                            "extract",
+                            "--mode",
+                            "llm:test-model",
+                            "--dry-run",
+                            "/fake/other.1.gz",
+                            f"@{list_path}",
+                        ],
+                    )
 
             self.assertEqual(result.exit_code, 0, result.output)
-            calls = [c.args[0] for c in mock_ext.extract.call_args_list]
-            self.assertIn("/fake/other.1.gz", calls)
-            self.assertIn("/fake/echo.1.gz", calls)
+            msgs = "\n".join(cm.output)
+            self.assertIn("fake/release/1/other.1.gz", msgs)
+            self.assertIn("fake/release/1/echo.1.gz", msgs)
         finally:
             os.unlink(list_path)
 
@@ -3070,7 +3077,9 @@ class TestExtractSizeFilters(unittest.TestCase):
 
             runner = CliRunner()
             with tempfile.TemporaryDirectory() as run_dir:
-                with patch("explainshell.manager._setup_logging", return_value=run_dir):
+                with patch(
+                    "explainshell.manager._attach_run_log", return_value=run_dir
+                ):
                     result = runner.invoke(
                         cli,
                         [

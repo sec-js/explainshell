@@ -56,10 +56,7 @@ from explainshell.extraction.report import (
     ExtractionReport,
     GitInfo,
 )
-from explainshell.extraction.runner import (
-    run,
-    run_sequential,
-)
+from explainshell.extraction.runner import run
 
 logger = logging.getLogger("explainshell.manager")
 
@@ -275,57 +272,58 @@ def _run_diff_db(
     )
 
 
-def _run_dry_run(
-    gz_files: list[str],
-    mode: str,
-    model: str | None,
-    run_dir: str,
-) -> BatchResult:
-    """Run --dry-run mode: extract but don't write to DB."""
-    cfg = ExtractorConfig(model=model, run_dir=run_dir, debug=True)
-    ext = make_extractor(mode, cfg)
-
-    def on_result(gz_path: str, entry: ExtractionResult) -> None:
-        short_path = config.source_from_path(gz_path)
-        if entry.outcome == ExtractionOutcome.SKIPPED:
-            logger.info("[%s] skipped: %s", short_path, entry.error)
-            return
-        if entry.outcome == ExtractionOutcome.FAILED:
-            logger.error("failed to process %s: %s", short_path, entry.error)
-            return
-        mp = entry.mp
-        file_elapsed = _fmt_elapsed(entry.stats.elapsed_seconds)
-        logger.info(
-            "=== %s (%d option(s), %s) ===",
-            short_path,
-            len(mp.options),
-            file_elapsed,
+def _format_decision(d: prefilter.Decision) -> str:
+    """One-line summary of a Decision for --dry-run output."""
+    if isinstance(d, prefilter.Work):
+        return f"WORK         {d.short_path}"
+    if isinstance(d, prefilter.SizeSkip):
+        cmp = ">" if d.direction == "max" else "<="
+        return f"SIZE-SKIP    {d.short_path} ({d.size} {cmp} {d.threshold})"
+    if isinstance(d, prefilter.AlreadyStored):
+        return f"ALREADY      {d.short_path}"
+    if isinstance(d, prefilter.FilterSkip):
+        return (
+            f"FILTER-SKIP  {d.short_path} "
+            f"(stored {d.stored_extractor}/{d.stored_model})"
         )
-        logger.info("  name: %s", mp.name)
-        logger.info("  synopsis: %s", mp.synopsis)
-        logger.info("  aliases: %s", mp.aliases)
-        logger.info("  nested_cmd: %s", mp.nested_cmd)
-        logger.info("  subcommands: %s", mp.subcommands)
-        logger.info("  dashless_opts: %s", mp.dashless_opts)
-        logger.info("  extractor: %s", mp.extractor)
-        logger.info("  extraction_meta: %s", mp.extraction_meta)
-        logger.info("")
-        for i, opt in enumerate(mp.options):
-            if i > 0:
-                logger.info("")
-            logger.info("  [%d]", i)
-            logger.info("      short: %s", opt.short)
-            logger.info("      long: %s", opt.long)
-            logger.info("      has_argument: %s", opt.has_argument)
-            if opt.positional:
-                logger.info("      positional: %s", opt.positional)
-            if opt.nested_cmd:
-                logger.info("      nested_cmd: %s", opt.nested_cmd)
-            desc = opt.text.strip()
-            for line in desc.split("\n"):
-                logger.info("      %s", line)
+    if isinstance(d, prefilter.Symlink):
+        loc = "in-input-set" if d.canonical_in_inputs else "not-in-inputs"
+        stale = ", stale-in-db" if d.stale_in_db else ""
+        return f"SYMLINK      {d.short_path} -> {d.canonical_source} ({loc}{stale})"
+    if isinstance(d, prefilter.ContentDup):
+        return f"CONTENT-DUP  {d.short_path} -> {d.canonical_source}"
+    return repr(d)
 
-    return run_sequential(ext, gz_files, on_result=on_result)
+
+def _run_plan(
+    gz_files: list[str],
+    s: store.Store,
+    *,
+    overwrite: bool,
+    filter_mode: str | None,
+    filter_model: str | None,
+    max_size: bool,
+    min_size: bool,
+) -> None:
+    """Print the prefilter classification for each file; no extraction, no writes."""
+    classifier = prefilter.Classifier(
+        s=s,
+        overwrite=overwrite,
+        filter_mode=filter_mode,
+        filter_model=filter_model,
+        max_size=max_size,
+        min_size=min_size,
+        size_threshold=_SIZE_FILTER_THRESHOLD,
+        normalized_inputs={os.path.normpath(p) for p in gz_files},
+    )
+    counts: dict[str, int] = {}
+    for gz_path in gz_files:
+        d = classifier.classify(gz_path)
+        kind = type(d).__name__
+        counts[kind] = counts.get(kind, 0) + 1
+        logger.info("%s", _format_decision(d))
+    summary = ", ".join(f"{n} {k.lower()}" for k, n in sorted(counts.items()))
+    logger.info("plan: %s (%d total)", summary or "(empty)", len(gz_files))
 
 
 # ---------------------------------------------------------------------------
@@ -444,42 +442,49 @@ def _write_report(run_dir: str, report: ExtractionReport) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _setup_logging(log_level_str: str) -> str:
-    """Configure logging for the CLI.
+_LOG_FMT = "%(asctime)s %(levelname)-5s [%(name)s:%(lineno)d] %(message)s"
+_LOG_DATEFMT = "%H:%M:%S"
 
-    Creates a timestamped run directory under ``logs/`` and writes
-    ``run.log`` inside it.  Returns the run directory path so that
-    other artifacts (debug files, manifests) can be placed alongside
-    the log.
-    """
-    import datetime
 
+def _setup_console_logging(log_level_str: str) -> None:
+    """Configure stderr logging only — no run dir, no file handler."""
     log_level = getattr(logging, log_level_str.upper())
-    fmt = "%(asctime)s %(levelname)-5s [%(name)s:%(lineno)d] %(message)s"
-    datefmt = "%H:%M:%S"
-
     logging.basicConfig(
         level=logging.WARNING,
         stream=sys.stderr,
-        format=fmt,
-        datefmt=datefmt,
+        format=_LOG_FMT,
+        datefmt=_LOG_DATEFMT,
     )
+    logging.getLogger("explainshell").setLevel(log_level)
 
-    logs_root = _LOGS_ROOT
+
+def _attach_run_log(log_level_str: str) -> str:
+    """Create a timestamped run dir and attach a file handler. Returns the run dir."""
+    import datetime
+
+    log_level = getattr(logging, log_level_str.upper())
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join(logs_root, timestamp)
+    run_dir = os.path.join(_LOGS_ROOT, timestamp)
     os.makedirs(run_dir, exist_ok=True)
     log_path = os.path.join(run_dir, "run.log")
 
     file_handler = logging.FileHandler(log_path)
     file_handler.setLevel(log_level)
-    file_handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+    file_handler.setFormatter(logging.Formatter(_LOG_FMT, datefmt=_LOG_DATEFMT))
     logging.getLogger("explainshell").addHandler(file_handler)
 
-    logging.getLogger("explainshell").setLevel(log_level)
+    # Logged after the file handler is attached so the run log captures it.
     logger.info("command line: %s", " ".join(sys.argv))
     logger.info("logging to %s", log_path)
+    return run_dir
 
+
+def _ensure_run_dir(ctx: click.Context) -> str:
+    """Lazily create the run dir for commands that need one. Cached on ctx."""
+    run_dir = ctx.obj.get("run_dir")
+    if run_dir is None:
+        run_dir = _attach_run_log(ctx.obj["log_level"])
+        ctx.obj["run_dir"] = run_dir
     return run_dir
 
 
@@ -497,7 +502,8 @@ def cli(ctx: click.Context, db: str | None, log_level: str) -> None:
     ctx.ensure_object(dict)
     ctx.obj["db"] = db
     ctx.obj["log_level"] = log_level
-    ctx.obj["run_dir"] = _setup_logging(log_level)
+    ctx.obj["run_dir"] = None
+    _setup_console_logging(log_level)
 
 
 def _require_db(ctx: click.Context, *, must_exist: bool = False) -> str:
@@ -520,7 +526,11 @@ def _require_db(ctx: click.Context, *, must_exist: bool = False) -> str:
     required=True,
     help="Extraction strategy: llm:<model>.",
 )
-@click.option("--dry-run", is_flag=True, help="Extract but don't write to DB.")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print the prefilter decision per file; don't extract or write to DB.",
+)
 @click.option(
     "--overwrite", is_flag=True, help="Re-process pages already in the store."
 )
@@ -604,8 +614,6 @@ def extract(
         raise click.UsageError("--max-size and --min-size are mutually exclusive")
     if drop and dry_run:
         raise click.UsageError("--drop and --dry-run are mutually exclusive")
-    if overwrite and dry_run:
-        raise click.UsageError("--overwrite and --dry-run are mutually exclusive")
 
     filter_mode: str | None = None
     filter_model: str | None = None
@@ -642,17 +650,21 @@ def extract(
             click.echo("Aborted.")
             return
 
-    run_dir: str = ctx.obj["run_dir"]
-
     if dry_run:
-        t0 = time.monotonic()
-        batch_result = _run_dry_run(gz_files, parsed_mode, model, run_dir)
-        elapsed = time.monotonic() - t0
-        rc = _log_summary(batch_result, 0, elapsed, dry_run=True)
-        if rc != 0:
-            sys.exit(rc)
+        db_path = _require_db(ctx, must_exist=True)
+        s = store.Store(db_path, read_only=True)
+        _run_plan(
+            gz_files,
+            s,
+            overwrite=overwrite,
+            filter_mode=filter_mode,
+            filter_model=filter_model,
+            max_size=max_size,
+            min_size=min_size,
+        )
         return
 
+    run_dir: str = _ensure_run_dir(ctx)
     db_path = _require_db(ctx)
     s = store.Store.create(db_path)
     if drop:
@@ -1060,7 +1072,7 @@ def salvage(
         db_path = None
         s = None
 
-    run_dir: str = ctx.obj["run_dir"]
+    run_dir: str = _ensure_run_dir(ctx)
     cfg = ExtractorConfig(model=model, run_dir=run_dir, debug=debug)
     extractor = make_extractor(parsed_mode, cfg)
     if not isinstance(extractor, BatchExtractor):
@@ -1142,7 +1154,7 @@ def diff_db_cmd(
     if not gz_files:
         raise click.UsageError("No .gz files found.")
 
-    run_dir: str = ctx.obj["run_dir"]
+    run_dir: str = _ensure_run_dir(ctx)
     s = store.Store.create(db_path)
     t0 = time.monotonic()
     batch_result = _run_diff_db(
@@ -1208,7 +1220,7 @@ def diff_extractors_cmd(
     if not gz_files:
         raise click.UsageError("No .gz files found.")
 
-    run_dir: str = ctx.obj["run_dir"]
+    run_dir: str = _ensure_run_dir(ctx)
     t0 = time.monotonic()
     batch_result = _run_diff_extractors(
         gz_files, left, right, run_dir, batch_size=batch
