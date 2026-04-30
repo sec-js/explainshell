@@ -146,6 +146,7 @@ python -m explainshell.manager extract --mode llm:openai/gpt-5-mini /path/to/man
     - `types.py` - Shared types (ExtractionResult, ExtractionStats, BatchResult, ExtractorConfig, Extractor protocol)
     - `runner.py` - Execution orchestration (sequential, parallel, batch)
     - `common.py` - Shared metadata assembly for all extractors
+    - `prefilter.py` - Pre-extraction classification of input .gz files (size, symlink, --filter-db, already-stored, content-dup)
     - `postprocess.py` - Extractor-agnostic option post-processing
     - `llm/` - LLM-based extraction subpackage
       - `extractor.py` - LLM extractor orchestration

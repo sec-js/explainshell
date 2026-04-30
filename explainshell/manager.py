@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 import click
 
-from explainshell import config, errors, models, store, util
+from explainshell import config, errors, store, util
 from explainshell.diff import format_diff
 from explainshell.extraction import (
     BatchResult,
@@ -41,6 +41,7 @@ from explainshell.extraction import (
     ExtractionOutcome,
     ExtractionResult,
     make_extractor,
+    prefilter,
 )
 from explainshell.extraction.manifest import (
     BatchManifest,
@@ -102,20 +103,6 @@ def _parse_mode(raw: str | None) -> tuple[str | None, str | None]:
             raise ValueError("llm:<model> requires a model name (e.g. llm:gpt-5-mini)")
         return "llm", model
     raise ValueError(f"invalid mode value: {raw!r} (expected 'llm:<model>')")
-
-
-def _matches_filter(
-    filter_mode: str,
-    filter_model: str | None,
-    stored_extractor: str,
-    stored_meta: models.ExtractionMeta,
-) -> bool:
-    """Return True if a stored row matches a --filter-db spec."""
-    if not stored_extractor or filter_mode != stored_extractor:
-        return False
-    if filter_mode == "llm":
-        return stored_meta.model == filter_model
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -673,155 +660,43 @@ def extract(
 
     db_before = s.counts()
     t0 = time.monotonic()
-    prefilter_skipped = 0
-    size_filtered = 0
     symlinks_mapped = 0
     content_deduped = 0
-    symlink_files: list[tuple[str, str, str]] = []  # (gz_path, source, canonical)
-    content_dup_files: list[tuple[str, str, str]] = []  # same shape
 
     cfg = ExtractorConfig(model=model, run_dir=run_dir, debug=debug)
     extractor = make_extractor(parsed_mode, cfg)
 
-    # Pre-filter already-stored files, separate symlinks, and deduplicate
-    # content-identical files (e.g. cross-compiler gcc variants).
-    # Dedup is scoped to (hash, distro, release) so cross-release lookups
-    # are not broken.  When --overwrite is set, we skip seeding from the DB
-    # so that every canonical gets re-extracted; in-run dedup still applies.
-    from explainshell.extraction.common import gz_sha256
+    # Classify inputs (size / symlink / filter-db / already-stored / content-dup)
+    # before extraction. Use os.path.normpath (not realpath) so symlinks don't
+    # resolve to their targets when checking whether a symlink's canonical is
+    # also in the input set.
+    classifier = prefilter.Classifier(
+        s=s,
+        overwrite=overwrite,
+        filter_mode=filter_mode,
+        filter_model=filter_model,
+        max_size=max_size,
+        min_size=min_size,
+        size_threshold=_SIZE_FILTER_THRESHOLD,
+        normalized_inputs={os.path.normpath(p) for p in gz_files},
+    )
+    decisions = [classifier.classify(p) for p in gz_files]
+    classified = prefilter.apply_decisions(decisions, s, filter_db=filter_db)
 
-    def _dedup_key(sha: str, source: str) -> str:
-        """Build a dedup key scoped to distro/release/section."""
-        # source format: "distro/release/section/file.gz"
-        prefix = source.rsplit("/", 1)[0]  # "distro/release/section"
-        return f"{sha}:{prefix}"
+    prefilter_skipped = classified.prefilter_skipped
+    symlink_files = classified.symlinks
+    content_dup_files = classified.content_dups
+    work_files = classified.work_files
 
-    hash_to_canonical: dict[str, str] = {}
-    if not overwrite:
-        for sha, source in s.known_sha256s().items():
-            hash_to_canonical[_dedup_key(sha, source)] = source
-
-    filter_index: dict[str, tuple[str, models.ExtractionMeta]] = {}
-    if filter_mode is not None:
-        filter_index = s.extractor_info_index()
-
-    # Normalize input paths so symlink handling can check whether the
-    # canonical target is already in the input set.  Use normpath (not
-    # realpath) so symlinks don't resolve to their targets.
-    normalized_inputs: set[str] = {os.path.normpath(p) for p in gz_files}
-
-    work_files: list[str] = []
-    for gz_path in gz_files:
-        short_path = config.source_from_path(gz_path)
-
-        if max_size or min_size:
-            size = os.path.getsize(gz_path)
-            if max_size and size > _SIZE_FILTER_THRESHOLD:
-                logger.debug(
-                    "size-filter skip %s (%d > %d)",
-                    short_path,
-                    size,
-                    _SIZE_FILTER_THRESHOLD,
-                )
-                prefilter_skipped += 1
-                size_filtered += 1
-                continue
-            if min_size and size <= _SIZE_FILTER_THRESHOLD:
-                logger.debug(
-                    "size-filter skip %s (%d <= %d)",
-                    short_path,
-                    size,
-                    _SIZE_FILTER_THRESHOLD,
-                )
-                prefilter_skipped += 1
-                size_filtered += 1
-                continue
-
-        if os.path.islink(gz_path):
-            canonical_path = os.path.realpath(gz_path)
-            canonical_source = config.source_from_path(canonical_path)
-            if canonical_source != short_path:
-                # Clean up stale data if this file was previously extracted as
-                # a regular file (e.g. manpages were refreshed and the file
-                # became a symlink).  The CASCADE delete removes orphan mappings.
-                if s.has_manpage_source(short_path):
-                    s.delete_manpage(short_path)
-                    logger.info(
-                        "removed stale manpage %s (now a symlink to %s)",
-                        short_path,
-                        canonical_source,
-                    )
-                symlink_files.append((gz_path, short_path, canonical_source))
-                if canonical_path not in normalized_inputs:
-                    logger.info(
-                        "skipping symlink %s -> %s (pass the canonical file to extract it)",
-                        short_path,
-                        canonical_source,
-                    )
-                else:
-                    logger.info(
-                        "skipping symlink %s -> %s (canonical file is in the input set)",
-                        short_path,
-                        canonical_source,
-                    )
-                continue
-
-        if overwrite and filter_mode is not None:
-            existing = filter_index.get(short_path)
-            if existing is not None:
-                stored_extractor, stored_meta = existing
-                if _matches_filter(
-                    filter_mode, filter_model, stored_extractor, stored_meta
-                ):
-                    # Matching DB row: queue directly and skip the
-                    # content-dedup check below. If a same-hash sibling
-                    # (new file or other DB row) appeared earlier in the
-                    # input and seeded hash_to_canonical, letting this row
-                    # fall through would alias it to that sibling and
-                    # leave its stale parsed_manpages row in place —
-                    # silently violating the "matching rows get
-                    # re-extracted" contract.
-                    work_files.append(gz_path)
-                    continue
-                logger.debug(
-                    "filter-skip %s (stored=%s/%s, filter=%s)",
-                    short_path,
-                    stored_extractor,
-                    stored_meta.model,
-                    filter_db,
-                )
-                prefilter_skipped += 1
-                # Intentionally do NOT seed hash_to_canonical from
-                # filter-skipped rows: the row we're preserving holds
-                # data we declined to refresh, so aliasing a fresh
-                # same-hash sibling onto it would pin the sibling to
-                # stale parsed output, and re-hashing the file on disk
-                # would also drift from the stored source_gz_sha256 if
-                # the .gz has changed since the last extraction.
-                continue
-
-        if not overwrite and s.has_manpage_source(short_path):
-            logger.debug("skipping %s (already stored)", short_path)
-            prefilter_skipped += 1
-            continue
-
-        h = gz_sha256(gz_path)
-        key = _dedup_key(h, short_path)
-        if key in hash_to_canonical:
-            content_dup_files.append((gz_path, short_path, hash_to_canonical[key]))
-            continue
-        hash_to_canonical[key] = short_path
-        work_files.append(gz_path)
-
-    if size_filtered:
+    if classified.size_filtered:
         which = "--max-size" if max_size else "--min-size"
         logger.info(
             "size-filtered %d file(s) by %s (threshold=%d)",
-            size_filtered,
+            classified.size_filtered,
             which,
             _SIZE_FILTER_THRESHOLD,
         )
-    already_stored_skipped = prefilter_skipped - size_filtered
+    already_stored_skipped = prefilter_skipped - classified.size_filtered
     if already_stored_skipped:
         logger.info("skipped %d already stored file(s)", already_stored_skipped)
     if content_dup_files:
