@@ -99,7 +99,7 @@ class GeminiProvider:
         client.batches.cancel(name=job_id)
 
     def retrieve_batch(self, batch_id: str) -> BatchJob:
-        """Retrieve a batch by ID (for salvage/inspection)."""
+        """Fetch a batch's current state by ID. For diagnostics; not on any hot path."""
         return self.client.batches.get(name=batch_id)
 
     def poll_batch(

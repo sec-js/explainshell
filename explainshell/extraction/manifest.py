@@ -114,29 +114,3 @@ class FileBatchManifestWriter:
             json.dump(data, f, indent=2)
             f.write("\n")
         os.replace(tmp_path, self._path)
-
-
-def load_manifest(path: str, expected_model: str) -> BatchManifest:
-    """Read, validate, and return parsed manifest.
-
-    Raises ``pydantic.ValidationError`` on schema errors and ``ValueError``
-    if the manifest model doesn't match *expected_model*.
-    """
-    with open(path) as f:
-        raw = json.load(f)
-    data = BatchManifest.model_validate(raw)
-    if data.model != expected_model:
-        raise ValueError(
-            f"manifest model {data.model!r} does not match "
-            f"requested model {expected_model!r}"
-        )
-    return data
-
-
-def failed_batches(data: BatchManifest) -> list[BatchManifestEntry]:
-    """Return entries that did not complete successfully.
-
-    Includes status "failed" (batch errored) and "submitted" (process
-    died after submit but before completion).
-    """
-    return [e for e in data.batches if e.status in ("failed", "submitted")]
