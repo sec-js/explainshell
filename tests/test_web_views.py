@@ -345,6 +345,7 @@ class TestExplainCacheHeaders(unittest.TestCase):
 
     def setUp(self):
         self.app = create_app()
+        self.app.config["DEBUG"] = False
         self.app.config["APP_VERSION"] = "deadbeef"
         self.app.config["DB_SHA256"] = "abcdef0123456789fedcba9876543210"
         self.store = Store.create(":memory:")

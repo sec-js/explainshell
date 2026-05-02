@@ -73,3 +73,10 @@
 {% endif %}
 {% endif %}
 {% endblock %}
+{% block footer -%}
+{% if config.DEBUG and raw_mp %}
+<div class="push"></div><div class="text-center"><small>
+source manpage: <a href="/manpage/{{ raw_mp.source[:-3] }}">{{ raw_mp.source[:-3]|e }}</a>
+</small></div>
+{% endif %}
+{%- endblock %}

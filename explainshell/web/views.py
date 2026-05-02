@@ -371,6 +371,8 @@ def _cacheable_explain_response(body: str):
     ``Set-Cookie`` and don't use Flask sessions, so cookies must not
     enter CF's cache key.
     """
+    if current_app.config.get("DEBUG"):
+        return make_response(body)
     response = make_response(body)
     db_sha = current_app.config.get("DB_SHA256", "local")
     app_ver = current_app.config.get("APP_VERSION", "local")
