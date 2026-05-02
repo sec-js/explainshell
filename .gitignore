@@ -18,3 +18,4 @@ ignore/
 todos/
 tests/evals/llm/runs/
 tests/evals/render/runs/
+explainshell.db
