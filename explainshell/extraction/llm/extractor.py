@@ -57,7 +57,7 @@ from pydantic import ValidationError
 
 from explainshell import config, manpage
 from explainshell.models import ExtractionMeta
-from explainshell.errors import ExtractionError, SkippedExtraction
+from explainshell.errors import ExtractionError, FailureReason, SkippedExtraction
 from explainshell.extraction.common import build_manpage_metadata, build_raw_manpage
 from explainshell.extraction.llm.prompt import SYSTEM_PROMPT
 from explainshell.extraction.llm.providers import (
@@ -235,7 +235,7 @@ class LLMExtractor:
 
         for i, user_content in enumerate(prepared.requests):
             if self._cancelled.is_set():
-                raise ExtractionError("cancelled")
+                raise ExtractionError("cancelled", reason_class=FailureReason.CANCELLED)
 
             chunk_label = (
                 f"chunk {i + 1}/{n_chunks}" if n_chunks > 1 else "single chunk"
@@ -277,7 +277,9 @@ class LLMExtractor:
         source = config.source_from_path(gz_path)
 
         if source in _BLACKLISTED_SOURCES:
-            raise SkippedExtraction("blacklisted")
+            raise SkippedExtraction(
+                "blacklisted", reason_class=FailureReason.BLACKLISTED
+            )
 
         synopsis, aliases = manpage.get_synopsis_and_aliases(gz_path)
         plain_text = clean_mandoc_artifacts(get_manpage_text(gz_path))
@@ -287,6 +289,7 @@ class LLMExtractor:
             raise SkippedExtraction(
                 f"manpage too large ({len(plain_text):,} chars, limit {MAX_MANPAGE_CHARS:,})",
                 stats=ExtractionStats(plain_text_len=len(plain_text)),
+                reason_class=FailureReason.MANPAGE_TOO_LARGE,
             )
 
         filtered_text, removal_counts = filter_sections(plain_text)
@@ -303,7 +306,10 @@ class LLMExtractor:
         n_chunks = len(chunks)
 
         if n_chunks > MAX_CHUNKS:
-            raise ExtractionError(f"too many chunks ({n_chunks:,}, limit {MAX_CHUNKS})")
+            raise ExtractionError(
+                f"too many chunks ({n_chunks:,}, limit {MAX_CHUNKS})",
+                reason_class=FailureReason.TOO_MANY_CHUNKS,
+            )
 
         requests: list[str] = []
         for i, chunk in enumerate(chunks):
@@ -445,6 +451,19 @@ class LLMExtractor:
 
         return ExtractionResult(gz_path=gz_path, mp=mp, raw=raw_mp, stats=stats)
 
+    @staticmethod
+    def _classify_provider_error(exc: BaseException) -> FailureReason:
+        """Map a provider exception to CONTENT_FILTER or PROVIDER_ERROR.
+
+        Azure / OpenAI surface content-policy refusals as a 400 with
+        ``code='content_filter'`` in the body.  Sniff for that token
+        in the string form (works across provider SDK shapes).
+        """
+        msg = str(exc).lower()
+        if "content_filter" in msg or "content management policy" in msg:
+            return FailureReason.CONTENT_FILTER
+        return FailureReason.PROVIDER_ERROR
+
     def _call_llm(self, user_content: str) -> ChunkResult:
         """Call LLM via the provider with retries."""
         messages = self._build_messages(user_content)
@@ -476,10 +495,16 @@ class LLMExtractor:
                 )
                 time.sleep(wait)
             except Exception as e:
-                raise ExtractionError(f"LLM call failed: {e}") from e
+                raise ExtractionError(
+                    f"LLM call failed: {e}",
+                    reason_class=self._classify_provider_error(e),
+                ) from e
 
         raise ExtractionError(
-            f"LLM call failed after 3 attempts: {last_err}"
+            f"LLM call failed after 3 attempts: {last_err}",
+            reason_class=self._classify_provider_error(last_err)
+            if last_err is not None
+            else FailureReason.PROVIDER_ERROR,
         ) from last_err
 
     @staticmethod

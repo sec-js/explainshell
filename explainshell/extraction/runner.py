@@ -11,7 +11,12 @@ import logging
 import threading
 from collections.abc import Callable
 from typing import Any, Literal, NamedTuple
-from explainshell.errors import ExtractionError, FatalExtractionError, SkippedExtraction
+from explainshell.errors import (
+    ExtractionError,
+    FailureReason,
+    FatalExtractionError,
+    SkippedExtraction,
+)
 from explainshell.util import fmt_tokens
 from explainshell.extraction.llm.extractor import BatchExtractor, PreparedFile
 from explainshell.extraction.llm.providers import BatchEntry, TokenUsage
@@ -127,12 +132,14 @@ def _extract_one(extractor: Extractor, gz_path: str) -> ExtractionResult:
             outcome=ExtractionOutcome.SKIPPED,
             stats=e.stats,
             error=e.reason,
+            reason_class=e.reason_class,
         )
     except ExtractionError as e:
         return ExtractionResult(
             gz_path=gz_path,
             outcome=ExtractionOutcome.FAILED,
             error=str(e),
+            reason_class=e.reason_class,
         )
     except Exception as e:
         logger.exception("fatal unexpected exception while extracting %s", gz_path)
@@ -383,12 +390,25 @@ def _process_one_batch(
                         outcome=ExtractionOutcome.FAILED,
                         error="incomplete batch result: missing response for one or more chunks",
                         stats=_prep_stats(prepared),
+                        reason_class=FailureReason.PROVIDER_BATCH_ERROR,
                     ),
                 )
                 continue
 
             try:
                 finalize_result = extractor.finalize(gz_path, prepared, responses)
+            except ExtractionError as e:
+                logger.error("failed to finalize %s: %s", gz_path, e)
+                _add(
+                    ExtractionResult(
+                        gz_path=gz_path,
+                        outcome=ExtractionOutcome.FAILED,
+                        error=str(e),
+                        stats=_prep_stats(prepared),
+                        reason_class=e.reason_class,
+                    ),
+                )
+                continue
             except Exception as e:
                 logger.error("failed to finalize %s: %s", gz_path, e)
                 _add(
@@ -397,6 +417,7 @@ def _process_one_batch(
                         outcome=ExtractionOutcome.FAILED,
                         error=str(e),
                         stats=_prep_stats(prepared),
+                        reason_class=FailureReason.UNEXPECTED,
                     ),
                 )
                 continue
@@ -415,6 +436,7 @@ def _process_one_batch(
                         outcome=ExtractionOutcome.FAILED,
                         error=f"batch {batch_idx} failed: {e}",
                         stats=_prep_stats(prepared),
+                        reason_class=FailureReason.PROVIDER_BATCH_ERROR,
                     ),
                 )
 
@@ -479,17 +501,31 @@ def run_batch(
                 outcome=ExtractionOutcome.SKIPPED,
                 stats=e.stats,
                 error=e.reason,
+                reason_class=e.reason_class,
             )
             _tally(result, entry)
             if on_result:
                 on_result(gz_path, entry)
             continue
-        except (ExtractionError, Exception) as e:
+        except ExtractionError as e:
             logger.error("failed to prepare %s: %s", gz_path, e)
             entry = ExtractionResult(
                 gz_path=gz_path,
                 outcome=ExtractionOutcome.FAILED,
                 error=str(e),
+                reason_class=e.reason_class,
+            )
+            _tally(result, entry)
+            if on_result:
+                on_result(gz_path, entry)
+            continue
+        except Exception as e:
+            logger.error("failed to prepare %s: %s", gz_path, e)
+            entry = ExtractionResult(
+                gz_path=gz_path,
+                outcome=ExtractionOutcome.FAILED,
+                error=str(e),
+                reason_class=FailureReason.UNEXPECTED,
             )
             _tally(result, entry)
             if on_result:

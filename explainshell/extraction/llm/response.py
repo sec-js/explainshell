@@ -7,7 +7,7 @@ import logging
 import re
 
 from explainshell import models
-from explainshell.errors import ExtractionError
+from explainshell.errors import ExtractionError, FailureReason
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ def parse_json_response(content: str) -> dict:
         raise ExtractionError(
             f"No JSON object found in LLM response: {content[:200]!r}",
             raw_response=content,
+            reason_class=FailureReason.INVALID_RESPONSE,
         )
 
     raw = content[start : end + 1]
@@ -56,7 +57,9 @@ def parse_json_response(content: str) -> dict:
         return json.loads(fix_invalid_escapes(raw))
     except json.JSONDecodeError as e:
         raise ExtractionError(
-            f"Invalid JSON from LLM: {e}", raw_response=content
+            f"Invalid JSON from LLM: {e}",
+            raw_response=content,
+            reason_class=FailureReason.INVALID_JSON,
         ) from e
 
 
@@ -81,7 +84,11 @@ def process_llm_result(content: str) -> tuple[dict, str]:
     try:
         validate_llm_response(data)
     except ValueError as e:
-        raise ExtractionError(str(e), raw_response=content) from e
+        raise ExtractionError(
+            str(e),
+            raw_response=content,
+            reason_class=FailureReason.INVALID_SCHEMA,
+        ) from e
     return data, content
 
 

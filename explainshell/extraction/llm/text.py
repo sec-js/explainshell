@@ -8,7 +8,7 @@ import re
 import subprocess
 
 from explainshell import config
-from explainshell.errors import ExtractionError
+from explainshell.errors import ExtractionError, FailureReason
 
 # 60K chars ≈ 15-20K tokens. This is deliberately conservative: benchmarking at
 # 100K showed that pages fitting in one larger chunk (e.g. avrdude at 68K chars)
@@ -53,7 +53,10 @@ def get_manpage_text(gz_path: str) -> str:
         timeout=60,
     )
     if result.returncode != 0 or not result.stdout.strip():
-        raise ExtractionError(f"mandoc failed for {gz_path}: {result.stderr}")
+        raise ExtractionError(
+            f"mandoc failed for {gz_path}: {result.stderr}",
+            reason_class=FailureReason.MANDOC_FAILED,
+        )
     return result.stdout.strip()
 
 

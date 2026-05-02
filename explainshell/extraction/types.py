@@ -6,6 +6,7 @@ import enum
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from explainshell.errors import FailureReason
 from explainshell.models import ParsedManpage, RawManpage
 
 
@@ -83,6 +84,9 @@ class ExtractionResult:
     gz_path: str = ""
     outcome: ExtractionOutcome = ExtractionOutcome.SUCCESS
     error: str | None = None
+    #: Classification of the skip/failure, set at the throw site.  ``None``
+    #: for SUCCESS, or for legacy callers that didn't tag the exception.
+    reason_class: FailureReason | None = None
 
 
 @dataclass

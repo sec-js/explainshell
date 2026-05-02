@@ -45,7 +45,11 @@ from explainshell.extraction.report import (
     ExtractConfig,
     ExtractSummary,
     ExtractionReport,
+    FailureEntry,
     GitInfo,
+    OptionCountSummary,
+    SkipEntry,
+    TokenUsage,
 )
 from explainshell.extraction.runner import run
 
@@ -701,6 +705,9 @@ def extract(
     start_counter = {"n": 0}
     result_counter = {"n": 0}
     counter_lock = threading.Lock()
+    option_counts: list[int] = []
+    failures: list[FailureEntry] = []
+    skips: list[SkipEntry] = []
 
     def on_start(gz_path: str) -> None:
         with counter_lock:
@@ -716,8 +723,12 @@ def extract(
             n = result_counter["n"]
         short_path = config.source_from_path(gz_path)
         progress = f"[{n + prefilter_skipped}/{extract_total}]"
+        reason_value = (
+            entry.reason_class.value if entry.reason_class is not None else None
+        )
         if entry.outcome == ExtractionOutcome.SUCCESS:
             s.add_manpage(entry.mp, entry.raw)
+            option_counts.append(len(entry.mp.options))
             logger.info(
                 "%s [%s] done: %d option(s)",
                 progress,
@@ -725,6 +736,13 @@ def extract(
                 len(entry.mp.options),
             )
         elif entry.outcome == ExtractionOutcome.SKIPPED:
+            skips.append(
+                SkipEntry(
+                    path=short_path,
+                    reason_class=reason_value,
+                    message=entry.error or "unknown reason",
+                )
+            )
             logger.info(
                 "%s [%s] skipped: %s",
                 progress,
@@ -732,6 +750,13 @@ def extract(
                 entry.error or "unknown reason",
             )
         elif entry.outcome == ExtractionOutcome.FAILED:
+            failures.append(
+                FailureEntry(
+                    path=short_path,
+                    reason_class=reason_value,
+                    message=entry.error or "unknown error",
+                )
+            )
             logger.error(
                 "%s [%s] FAILED: %s",
                 progress,
@@ -835,6 +860,16 @@ def extract(
         ),
         db_before=DbCounts(**db_before),
         db_after=DbCounts(**s.counts()),
+        usage=TokenUsage(
+            input_tokens=batch_result.stats.input_tokens,
+            output_tokens=batch_result.stats.output_tokens,
+            reasoning_tokens=batch_result.stats.reasoning_tokens,
+            chunks=batch_result.stats.chunks,
+            plain_text_chars=batch_result.stats.plain_text_len,
+        ),
+        option_counts=OptionCountSummary.from_counts(option_counts),
+        failures=failures,
+        skips=skips,
         batch_manifest=manifest.to_dict() if manifest is not None else None,
     )
     _write_report(run_dir, report)
@@ -1174,13 +1209,12 @@ def show_events(ctx: click.Context, limit: int) -> None:
             click.echo(
                 f"  result:   ok={sm.succeeded} skip={sm.skipped} fail={sm.failed}"
             )
-            if report.db_before and report.db_after:
-                dm = report.db_after.manpages - report.db_before.manpages
-                dmap = report.db_after.mappings - report.db_before.mappings
-                click.echo(
-                    f"  db:       {report.db_after.manpages}({dm:+d})"
-                    f" mappings={report.db_after.mappings}({dmap:+d})"
-                )
+            dm = report.db_after.manpages - report.db_before.manpages
+            dmap = report.db_after.mappings - report.db_before.mappings
+            click.echo(
+                f"  db:       {report.db_after.manpages}({dm:+d})"
+                f" mappings={report.db_after.mappings}({dmap:+d})"
+            )
         else:
             meta = ev.get("metadata", {})
             for k, v in meta.items():

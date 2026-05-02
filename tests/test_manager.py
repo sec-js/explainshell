@@ -2214,6 +2214,8 @@ class TestShowCli(unittest.TestCase):
                 "config": {"mode": "llm"},
                 "elapsed_seconds": 1.0,
                 "summary": {"succeeded": 0, "skipped": 0, "failed": 0},
+                "db_before": {"manpages": 0, "mappings": 0},
+                "db_after": {"manpages": 0, "mappings": 0},
             },
         )
 
@@ -2268,6 +2270,8 @@ class TestShowCli(unittest.TestCase):
                     "config": {"mode": "llm"},
                     "elapsed_seconds": 1.0,
                     "summary": {"succeeded": i, "skipped": 0, "failed": 0},
+                    "db_before": {"manpages": 0, "mappings": 0},
+                    "db_after": {"manpages": 0, "mappings": 0},
                 },
             )
 
@@ -2584,6 +2588,288 @@ class TestExtractionReport(unittest.TestCase):
         data = self._read_report()
         self.assertEqual(data["summary"]["fatal_error"], "provider auth failed")
         self.assertEqual(data["summary"]["failed"], 1)
+
+
+class TestOptionCountSummary(unittest.TestCase):
+    """OptionCountSummary.from_counts: histogram math."""
+
+    def test_empty_returns_zero_summary(self) -> None:
+        """Empty counts yield a zero-everything summary, never None."""
+        from explainshell.extraction.report import OptionCountSummary
+
+        s = OptionCountSummary.from_counts([])
+        self.assertEqual(s.n, 0)
+        self.assertEqual(s.total, 0)
+        self.assertEqual(s.mean, 0.0)
+        self.assertEqual(s.max, 0)
+        self.assertEqual(s.buckets, {"0": 0, "1-5": 0, "6-15": 0, "16-50": 0, "50+": 0})
+
+    def test_buckets_and_stats(self) -> None:
+        from explainshell.extraction.report import OptionCountSummary
+
+        counts = [0, 0, 1, 3, 5, 7, 10, 15, 16, 30, 50, 51, 100]
+        s = OptionCountSummary.from_counts(counts)
+        assert s is not None
+        self.assertEqual(s.n, 13)
+        self.assertEqual(s.total, sum(counts))
+        self.assertEqual(s.max, 100)
+        self.assertEqual(
+            s.buckets,
+            {"0": 2, "1-5": 3, "6-15": 3, "16-50": 3, "50+": 2},
+        )
+        # mean = sum/n; median is the middle of sorted list (n=13 -> index 6 = 10)
+        self.assertAlmostEqual(s.mean, sum(counts) / 13, places=2)
+        self.assertEqual(s.median, 10.0)
+
+    def test_single_count_p90_fallback(self) -> None:
+        """statistics.quantiles needs >= 2 points; single point falls back."""
+        from explainshell.extraction.report import OptionCountSummary
+
+        s = OptionCountSummary.from_counts([7])
+        assert s is not None
+        self.assertEqual(s.n, 1)
+        self.assertEqual(s.p90, 7.0)
+
+
+class TestReportFailureAndSkipReporting(unittest.TestCase):
+    """report.json captures classified failures, skips, option histogram, and tokens."""
+
+    @patch("explainshell.extraction.common.gz_sha256", side_effect=lambda p: p)
+    @patch("explainshell.manager.run")
+    @patch("explainshell.manager.make_extractor")
+    @patch("explainshell.util.collect_gz_files")
+    @patch("explainshell.manager.config.source_from_path")
+    def test_classified_outcomes_recorded(
+        self,
+        mock_source,
+        mock_collect,
+        mock_make_ext,
+        mock_run,
+        _mock_sha,
+    ) -> None:
+        from explainshell.errors import FailureReason
+
+        with _temp_db() as db_path:
+            gz_files = [
+                "/fake/distro/release/1/ok.1.gz",
+                "/fake/distro/release/1/bad.1.gz",
+                "/fake/distro/release/1/skipped.1.gz",
+            ]
+            mock_collect.return_value = gz_files
+            mock_source.side_effect = lambda p: "/".join(p.split("/")[-4:])
+            mock_make_ext.return_value = MagicMock()
+
+            def _fake_run(
+                ext,
+                files,
+                batch_size=None,
+                jobs=1,
+                on_start=None,
+                on_result=None,
+                manifest=None,
+            ):
+                batch = BatchResult()
+                # ok: SUCCESS with 4 options
+                ok = files[0]
+                mp = _make_manpage_from_source(mock_source(ok))
+                mp.options = [
+                    Option(text=f"-{i}", short=[f"-{i}"], long=[], has_argument=False)
+                    for i in range(4)
+                ]
+                batch.n_succeeded += 1
+                batch.stats.input_tokens = 1234
+                batch.stats.output_tokens = 567
+                batch.stats.reasoning_tokens = 89
+                batch.stats.chunks = 2
+                batch.stats.plain_text_len = 4096
+                if on_result:
+                    on_result(
+                        ok,
+                        ExtractionResult(
+                            gz_path=ok,
+                            outcome=ExtractionOutcome.SUCCESS,
+                            mp=mp,
+                            raw=_make_raw(sha256=ok),
+                            stats=ExtractionStats(),
+                        ),
+                    )
+                # bad: FAILED with line-span coverage classification
+                bad = files[1]
+                batch.n_failed += 1
+                if on_result:
+                    on_result(
+                        bad,
+                        ExtractionResult(
+                            gz_path=bad,
+                            outcome=ExtractionOutcome.FAILED,
+                            error="line-span coverage 4.5x exceeds 3.0x limit",
+                            reason_class=FailureReason.LINE_SPAN_COVERAGE,
+                        ),
+                    )
+                # skipped: SKIPPED with manpage_too_large classification
+                sk = files[2]
+                batch.n_skipped += 1
+                if on_result:
+                    on_result(
+                        sk,
+                        ExtractionResult(
+                            gz_path=sk,
+                            outcome=ExtractionOutcome.SKIPPED,
+                            error="manpage too large (600,000 chars, limit 500,000)",
+                            reason_class=FailureReason.MANPAGE_TOO_LARGE,
+                        ),
+                    )
+                return batch
+
+            mock_run.side_effect = _fake_run
+
+            runner = CliRunner()
+            with tempfile.TemporaryDirectory() as run_dir:
+                with patch(
+                    "explainshell.manager._attach_run_log", return_value=run_dir
+                ):
+                    result = runner.invoke(
+                        cli,
+                        [
+                            "--db",
+                            db_path,
+                            "extract",
+                            "--mode",
+                            "llm:openai/test-model",
+                            "/fake/file.gz",
+                        ],
+                    )
+
+                # Failed file → nonzero exit; report is still written.
+                self.assertEqual(result.exit_code, 1, result.output)
+                with open(os.path.join(run_dir, "report.json")) as f:
+                    data = json.load(f)
+
+                # failures
+                self.assertEqual(len(data["failures"]), 1)
+                self.assertEqual(
+                    data["failures"][0]["reason_class"], "line_span_coverage"
+                )
+                self.assertEqual(
+                    data["failures"][0]["path"], "distro/release/1/bad.1.gz"
+                )
+                self.assertIn("line-span coverage", data["failures"][0]["message"])
+
+                # skips
+                self.assertEqual(len(data["skips"]), 1)
+                self.assertEqual(data["skips"][0]["reason_class"], "manpage_too_large")
+
+                # token usage
+                self.assertEqual(data["usage"]["input_tokens"], 1234)
+                self.assertEqual(data["usage"]["output_tokens"], 567)
+                self.assertEqual(data["usage"]["reasoning_tokens"], 89)
+                self.assertEqual(data["usage"]["chunks"], 2)
+                self.assertEqual(data["usage"]["plain_text_chars"], 4096)
+
+                # option histogram
+                self.assertEqual(data["option_counts"]["n"], 1)
+                self.assertEqual(data["option_counts"]["total"], 4)
+                self.assertEqual(data["option_counts"]["max"], 4)
+                self.assertEqual(data["option_counts"]["buckets"]["1-5"], 1)
+
+
+class TestThrowSitesTagged(unittest.TestCase):
+    """Each FailureReason has a corresponding throw site that emits it.
+
+    Drives the extractor pipeline with carefully crafted inputs and asserts
+    the resulting exception carries the expected ``reason_class``.
+    """
+
+    def test_invalid_response_no_json(self) -> None:
+        from explainshell.errors import ExtractionError, FailureReason
+        from explainshell.extraction.llm.response import parse_json_response
+
+        with self.assertRaises(ExtractionError) as cm:
+            parse_json_response("I'm sorry, but I cannot assist.")
+        self.assertEqual(cm.exception.reason_class, FailureReason.INVALID_RESPONSE)
+
+    def test_invalid_json(self) -> None:
+        from explainshell.errors import ExtractionError, FailureReason
+        from explainshell.extraction.llm.response import parse_json_response
+
+        with self.assertRaises(ExtractionError) as cm:
+            # Malformed JSON, no escapes to repair.
+            parse_json_response("{not even close}")
+        self.assertEqual(cm.exception.reason_class, FailureReason.INVALID_JSON)
+
+    def test_invalid_schema(self) -> None:
+        from explainshell.errors import ExtractionError, FailureReason
+        from explainshell.extraction.llm.response import process_llm_result
+
+        with self.assertRaises(ExtractionError) as cm:
+            # Valid JSON, missing 'options' key.
+            process_llm_result('{"foo": []}')
+        self.assertEqual(cm.exception.reason_class, FailureReason.INVALID_SCHEMA)
+
+    def test_line_span_coverage(self) -> None:
+        from explainshell.errors import ExtractionError, FailureReason
+        from explainshell.extraction.postprocess import sanity_check_line_spans
+        from explainshell.models import Option
+
+        # 5 options each spanning 1..20 = 100 lines covered, max_end=20 -> 5x.
+        opts = [
+            Option(
+                text="x",
+                short=[f"-{c}"],
+                long=[],
+                has_argument=False,
+                meta={"lines": [1, 20]},
+            )
+            for c in "abcde"
+        ]
+        with self.assertRaises(ExtractionError) as cm:
+            sanity_check_line_spans(opts)
+        self.assertEqual(cm.exception.reason_class, FailureReason.LINE_SPAN_COVERAGE)
+
+    def test_mandoc_failed(self) -> None:
+        from explainshell.errors import ExtractionError, FailureReason
+        from explainshell.extraction.llm import text as text_mod
+
+        # Patch subprocess.run to simulate mandoc failure.
+        with patch.object(text_mod, "subprocess") as mock_subp:
+            mock_subp.run.return_value = MagicMock(
+                returncode=1, stdout="", stderr="mandoc: parse error"
+            )
+            with patch("os.path.isfile", return_value=True):
+                with self.assertRaises(ExtractionError) as cm:
+                    text_mod.get_manpage_text("/fake/path.gz")
+        self.assertEqual(cm.exception.reason_class, FailureReason.MANDOC_FAILED)
+
+    def test_blacklisted_skip(self) -> None:
+        """Blacklisted source raises SkippedExtraction(reason_class=BLACKLISTED)."""
+        from explainshell.errors import FailureReason, SkippedExtraction
+        from explainshell.extraction.llm import extractor as ext_mod
+
+        # Pick any entry from the blacklist.
+        blacklisted = next(iter(ext_mod._BLACKLISTED_SOURCES))
+        e = ext_mod.LLMExtractor.__new__(ext_mod.LLMExtractor)
+
+        with patch("explainshell.config.source_from_path", return_value=blacklisted):
+            with self.assertRaises(SkippedExtraction) as cm:
+                e.prepare("/fake/blacklisted.gz")
+        self.assertEqual(cm.exception.reason_class, FailureReason.BLACKLISTED)
+
+    def test_classify_provider_error(self) -> None:
+        from explainshell.errors import FailureReason
+        from explainshell.extraction.llm.extractor import LLMExtractor
+
+        cf = LLMExtractor._classify_provider_error(
+            Exception(
+                "Error code: 400 - {'error': {'code': 'content_filter', "
+                "'message': 'response was filtered'}}"
+            )
+        )
+        self.assertEqual(cf, FailureReason.CONTENT_FILTER)
+
+        other = LLMExtractor._classify_provider_error(
+            Exception("Error code: 502 - bad gateway")
+        )
+        self.assertEqual(other, FailureReason.PROVIDER_ERROR)
 
 
 class TestExtractSizeFilters(unittest.TestCase):

@@ -13,7 +13,7 @@ from google.genai import Client, types
 from google.genai.errors import ClientError, ServerError
 from google.genai.types import BatchJob
 
-from explainshell.errors import ExtractionError
+from explainshell.errors import ExtractionError, FailureReason
 from explainshell.extraction.llm.prompt import SYSTEM_PROMPT
 from explainshell.extraction.llm.providers import BatchEntry, BatchResults, TokenUsage
 
@@ -135,7 +135,8 @@ class GeminiProvider:
                 )
                 if consecutive_errors >= max_consecutive_errors:
                     raise ExtractionError(
-                        f"Batch poll failed after {max_consecutive_errors} consecutive errors: {e}"
+                        f"Batch poll failed after {max_consecutive_errors} consecutive errors: {e}",
+                        reason_class=FailureReason.PROVIDER_BATCH_ERROR,
                     ) from e
                 _wait()
                 continue
@@ -145,11 +146,20 @@ class GeminiProvider:
             if state in ("JOB_STATE_SUCCEEDED", "SUCCEEDED"):
                 return job
             if state in ("JOB_STATE_FAILED", "FAILED"):
-                raise ExtractionError(f"Batch job failed: {job_id}")
+                raise ExtractionError(
+                    f"Batch job failed: {job_id}",
+                    reason_class=FailureReason.PROVIDER_BATCH_ERROR,
+                )
             if state in ("JOB_STATE_CANCELLED", "CANCELLED"):
-                raise ExtractionError(f"Batch job cancelled: {job_id}")
+                raise ExtractionError(
+                    f"Batch job cancelled: {job_id}",
+                    reason_class=FailureReason.PROVIDER_BATCH_ERROR,
+                )
             if state in ("JOB_STATE_EXPIRED", "EXPIRED"):
-                raise ExtractionError(f"Batch job expired: {job_id}")
+                raise ExtractionError(
+                    f"Batch job expired: {job_id}",
+                    reason_class=FailureReason.PROVIDER_BATCH_ERROR,
+                )
 
             logger.info(
                 "batch %s: state=%s, polling again in %ds...",

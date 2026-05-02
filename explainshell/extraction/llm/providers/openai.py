@@ -13,7 +13,7 @@ import openai
 from openai import OpenAI
 from openai.types import Batch
 
-from explainshell.errors import ExtractionError
+from explainshell.errors import ExtractionError, FailureReason
 from explainshell.extraction.llm.prompt import SYSTEM_PROMPT
 from explainshell.extraction.llm.providers import BatchEntry, BatchResults, TokenUsage
 
@@ -195,7 +195,8 @@ class OpenAIProvider:
                 )
                 if consecutive_errors >= MAX_POLL_ERRORS:
                     raise ExtractionError(
-                        f"Batch poll failed after {MAX_POLL_ERRORS} consecutive errors: {e}"
+                        f"Batch poll failed after {MAX_POLL_ERRORS} consecutive errors: {e}",
+                        reason_class=FailureReason.PROVIDER_BATCH_ERROR,
                     ) from e
                 if stop_event is not None:
                     stop_event.wait(backoff)
@@ -206,7 +207,8 @@ class OpenAIProvider:
                 continue
             except Exception as e:
                 raise ExtractionError(
-                    f"Batch poll failed with non-retryable error: {e}"
+                    f"Batch poll failed with non-retryable error: {e}",
+                    reason_class=FailureReason.PROVIDER_BATCH_ERROR,
                 ) from e
 
             status = batch.status
@@ -218,12 +220,18 @@ class OpenAIProvider:
             if status == "completed":
                 return batch
             if status == "failed":
-                raise ExtractionError(f"Batch job failed: {job_id}")
+                raise ExtractionError(
+                    f"Batch job failed: {job_id}",
+                    reason_class=FailureReason.PROVIDER_BATCH_ERROR,
+                )
             if status == "cancelled":
                 if cancel_initiated_at is not None:
                     # We cancelled it due to stall — return for partial result collection.
                     return batch
-                raise ExtractionError(f"Batch job cancelled: {job_id}")
+                raise ExtractionError(
+                    f"Batch job cancelled: {job_id}",
+                    reason_class=FailureReason.PROVIDER_BATCH_ERROR,
+                )
             if status == "expired":
                 logger.warning(
                     "batch %s: expired%s, collecting partial results...",
@@ -270,7 +278,8 @@ class OpenAIProvider:
                         client.batches.cancel(job_id)
                     except Exception as e:
                         raise ExtractionError(
-                            f"Batch wall-time limit reached and cancel failed: {e}"
+                            f"Batch wall-time limit reached and cancel failed: {e}",
+                            reason_class=FailureReason.PROVIDER_BATCH_ERROR,
                         ) from e
                     cancel_initiated_at = now
             else:

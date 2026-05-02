@@ -6,7 +6,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from explainshell.errors import ExtractionError
+from explainshell.errors import ExtractionError, FailureReason
 from explainshell.models import Option
 
 logger = logging.getLogger(__name__)
@@ -234,7 +234,8 @@ def sanity_check_line_spans(options: list[Option]) -> None:
         raise ExtractionError(
             f"line-span coverage {coverage:.1f}x exceeds {_MAX_COVERAGE_RATIO}x limit "
             f"({len(options)} options, {max_end} lines) "
-            f"(try a stronger model?)"
+            f"(try a stronger model?)",
+            reason_class=FailureReason.LINE_SPAN_COVERAGE,
         )
 
 
