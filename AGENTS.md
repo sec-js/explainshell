@@ -35,13 +35,13 @@ Use the LLM eval (`tests/evals/llm/llm_eval.py`) to compare before/after metrics
 git stash push -- explainshell/extraction/llm/
 
 # 2. Run on the old code
-python tests/evals/llm/llm_eval.py run --label baseline --model openai/gpt-5-mini --jobs 10 -d "baseline before <short summary of change>"
+python tests/evals/llm/llm_eval.py run --label baseline --model codex/gpt-5.4/medium --jobs 10 -d "baseline before <short summary of change>"
 
 # 3. Restore your changes
 git stash pop
 
 # 4. Run on the new code
-python tests/evals/llm/llm_eval.py run --label change --model openai/gpt-5-mini --jobs 10 -d "<short summary of change>"
+python tests/evals/llm/llm_eval.py run --label change --model codex/gpt-5.4/medium --jobs 10 -d "<short summary of change>"
 
 # 5. Compare the two run directories (oldest first)
 python tests/evals/llm/llm_eval.py compare tests/evals/llm/runs/<baseline-run> tests/evals/llm/runs/<change-run>
@@ -51,10 +51,10 @@ python tests/evals/llm/llm_eval.py compare tests/evals/llm/runs/<baseline-run> t
 
 ```bash
 # Run on the default corpus, parallelizing realtime calls
-python tests/evals/llm/llm_eval.py run --label smoke --model openai/gpt-5-mini --jobs 10
+python tests/evals/llm/llm_eval.py run --label smoke --model codex/gpt-5.4/medium --jobs 10
 
 # Run on specific files (overrides --corpus)
-python tests/evals/llm/llm_eval.py run --label probe --model openai/gpt-5-mini --jobs 10 path/to/file.1.gz
+python tests/evals/llm/llm_eval.py run --label probe --model codex/gpt-5.4/medium --jobs 10 path/to/file.1.gz
 
 # Use --batch <size> instead of --jobs to route through the provider's batch API
 # (cheaper, but minutes-to-hours of queue latency; pays off only on much larger corpora).
@@ -121,7 +121,7 @@ make ubuntu-archive UBUNTU_RELEASE=resolute
 make arch-archive
 
 # Process a man page into the database
-python -m explainshell.manager extract --mode llm:openai/gpt-5-mini /path/to/manpage.1.gz
+python -m explainshell.manager extract --mode llm:codex/gpt-5.4/medium /path/to/manpage.1.gz
 ```
 
 ## Project Structure
@@ -194,8 +194,8 @@ SQLite with two tables:
 - **mapping** - command name → manpage id lookup (many-to-one, with score for preference)
 
 Key classes (Pydantic models in models.py):
-- `Option` - text, short/long flag lists, has_argument, positional, nested_cmd
-- `ParsedManpage` - container with options/positionals properties and `find_option(flag)` lookup
+- `Option` - text, short/long flag lists, has_argument, positional, prefix (literal sigil a token must start with for a positional to claim it, e.g. `@` in dig's `[@server]`; restricted to the `OPTION_PREFIX_SIGILS` allowlist `@`/`+`/`:`), nested_cmd
+- `ParsedManpage` - container with options/positionals/prefixed_positionals properties and `find_option(flag)` lookup; `positionals` excludes prefix-bearing options, which are exposed via `prefixed_positionals` (name → (prefix, text))
 
 ### Command Matching (matcher.py)
 
@@ -203,6 +203,7 @@ Uses bashlex AST visitor pattern:
 - `Matcher` inherits from `bashlex.ast.nodevisitor`
 - `visitcommand()` - looks up man page, handles multi-command (e.g., `git commit`)
 - `visitword()` - matches tokens to options (exact match, then fuzzy split for combined short flags like `-abc`)
+- Positional operands use two pools: prefixed positionals are claimed only by tokens starting with their sigil (e.g. `@8.8.8.8` → dig's `server`); remaining tokens consume the non-prefixed positionals in order, reusing the last one (variadic). A token whose sigil no positional declares falls through to ordered consumption; if all positionals are prefixed and none match, the token is unknown.
 - Produces `MatchResult(start, end, text, match)` where start/end are character positions in the original string
 
 ### E2E Tests

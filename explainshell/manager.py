@@ -1090,6 +1090,8 @@ def show_manpage(
         click.echo(f"      has_argument: {opt.has_argument}")
         if opt.positional:
             click.echo(f"      positional: {opt.positional}")
+        if opt.prefix:
+            click.echo(f"      prefix: {opt.prefix}")
         if opt.nested_cmd:
             click.echo(f"      nested_cmd: {opt.nested_cmd}")
         desc = opt.text.strip()

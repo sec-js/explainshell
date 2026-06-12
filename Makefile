@@ -8,7 +8,7 @@ E2E_DB := tests/e2e/e2e.db
 
 e2e-db:
 	rm -f $(E2E_DB)
-	python -m explainshell.manager --db $(E2E_DB) extract --mode llm:openai/gpt-5.2 $(E2E_MANPAGES_25)/tar.1.gz $(E2E_MANPAGES_25)/echo.1.gz $(E2E_MANPAGES_25)/grep.1.gz $(E2E_MANPAGES_24)/tar.1.gz $(E2E_MANPAGES_24)/echo.1.gz $(E2E_MANPAGES_24)/grep.1.gz $(E2E_MANPAGES_ARCH)/tar.1.gz $(E2E_MANPAGES_25)/git-rebase.1.gz
+	python -m explainshell.manager --db $(E2E_DB) extract --mode llm:codex/gpt-5.4/medium -j 9 $(E2E_MANPAGES_25)/tar.1.gz $(E2E_MANPAGES_25)/echo.1.gz $(E2E_MANPAGES_25)/grep.1.gz $(E2E_MANPAGES_24)/tar.1.gz $(E2E_MANPAGES_24)/echo.1.gz $(E2E_MANPAGES_24)/grep.1.gz $(E2E_MANPAGES_ARCH)/tar.1.gz $(E2E_MANPAGES_25)/git-rebase.1.gz $(E2E_MANPAGES_25)/dig.1.gz
 
 e2e:
 	@npx playwright --version >/dev/null 2>&1 || (echo "playwright is required. Install with: npm install && npx playwright install chromium"; exit 1)

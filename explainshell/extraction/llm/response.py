@@ -132,6 +132,9 @@ def normalize_option_fields(raw: dict) -> dict:
     - ``has_argument: null`` → ``False`` (8 positional-arg options)
     - ``has_argument`` list with int elements → stringified (hdparm --set-sector-size)
     - ``has_argument`` bare string (e.g. ``"1..99"``) → ``True`` (avrdude range params)
+    - sigil embedded in the positional name (``"positional": "@server"``) →
+      split into ``prefix`` + bare name; only for allowlisted sigil characters,
+      so placeholder styling like ``<FILE>`` is untouched
     """
     raw = dict(raw)  # shallow copy to avoid mutating caller's data
 
@@ -147,6 +150,17 @@ def normalize_option_fields(raw: dict) -> dict:
     if isinstance(ha, str):
         raw["has_argument"] = True
 
+    # Strip a leading sigil from the positional name into prefix.
+    pos = raw.get("positional")
+    if (
+        isinstance(pos, str)
+        and len(pos) > 1
+        and pos[0] in models.OPTION_PREFIX_SIGILS
+        and not raw.get("prefix")
+    ):
+        raw["prefix"] = pos[0]
+        raw["positional"] = pos[1:]
+
     return raw
 
 
@@ -156,10 +170,11 @@ def sanitize_option_fields(
     has_argument: bool | list[str],
     positional: str | None,
     nested_cmd: bool,
-) -> tuple[list[str], list[str], bool | list[str], str | None, bool]:
+    prefix: str | None = None,
+) -> tuple[list[str], list[str], bool | list[str], str | None, bool, str | None]:
     """Fix common LLM mistakes in option fields.
 
-    Returns (short, long, has_argument, positional, nested_cmd).
+    Returns (short, long, has_argument, positional, nested_cmd, prefix).
     """
     if positional and (short or long):
         logger.debug(
@@ -167,10 +182,22 @@ def sanitize_option_fields(
         )
         positional = None
 
+    if prefix and not positional:
+        logger.debug("clearing prefix=%r on non-positional option", prefix)
+        prefix = None
+
+    if prefix and prefix not in models.OPTION_PREFIX_SIGILS:
+        logger.debug(
+            "dropping prefix=%r on positional %r: not in sigil allowlist",
+            prefix,
+            positional,
+        )
+        prefix = None
+
     if nested_cmd and not has_argument:
         has_argument = True
 
-    return short, long, has_argument, positional, nested_cmd
+    return short, long, has_argument, positional, nested_cmd, prefix
 
 
 def llm_option_to_store_option(
@@ -185,6 +212,7 @@ def llm_option_to_store_option(
     long = raw.get("long") or []
     has_argument = raw.get("has_argument", False)
     positional = raw.get("positional") or None
+    prefix = raw.get("prefix") or None
     nested_cmd = bool(raw.get("nested_cmd", False))
 
     if not isinstance(short, list):
@@ -198,8 +226,8 @@ def llm_option_to_store_option(
     start, end = int(lines[0]), int(lines[1])
     text = extract_text_from_lines(original_lines, start, end)
 
-    short, long, has_argument, positional, nested_cmd = sanitize_option_fields(
-        short, long, has_argument, positional, nested_cmd
+    short, long, has_argument, positional, nested_cmd, prefix = sanitize_option_fields(
+        short, long, has_argument, positional, nested_cmd, prefix
     )
 
     return models.Option(
@@ -208,6 +236,7 @@ def llm_option_to_store_option(
         long=long,
         has_argument=has_argument,
         positional=positional,
+        prefix=prefix,
         nested_cmd=nested_cmd,
         meta={"lines": [start, end]},
     )

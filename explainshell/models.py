@@ -36,6 +36,14 @@ class ExtractionMeta(BaseModel):
     model: str | None = None
 
 
+# Literal sigil characters allowed in Option.prefix.  Grounded in a scan of
+# all SYNOPSIS sections in the corpus: '@' (dig @server, gcc @FILE argfiles),
+# '+' (date +FORMAT, vi-style +line), ':' (X display numbers).  Kept narrow
+# on purpose — a false-positive prefix removes a positional from ordered
+# matching entirely (e.g. ssh's '[user@]hostname' must NOT become a prefix).
+OPTION_PREFIX_SIGILS = frozenset({"@", "+", ":"})
+
+
 class Option(BaseModel):
     """An extracted command-line option from a man page.
 
@@ -43,6 +51,8 @@ class Option(BaseModel):
     long - a list of long options (--a, --b)
     has_argument - specifies if one of the short/long options expects an additional argument
     positional - specifies if to consider this as positional arguments
+    prefix - literal sigil a token must start with for this positional to claim
+        it (e.g. '@' in dig's '[@server]'); only meaningful when positional is set
     nested_cmd - specifies if the arguments to this option can start a nested command
     """
 
@@ -51,6 +61,7 @@ class Option(BaseModel):
     long: list[str] = []
     has_argument: bool | list[str] = False
     positional: str | bool | None = None
+    prefix: str | None = None
     nested_cmd: bool | list[str] = False
     meta: dict | None = None
 
@@ -105,10 +116,13 @@ class ParsedManpage(BaseModel):
 
     @property
     def positionals(self):
-        # go over all options and look for those with the same 'positional' field
+        # go over all options and look for those with the same 'positional'
+        # field; prefix-bearing positionals are excluded from ordered
+        # consumption — they can only be claimed by a token carrying their
+        # prefix (see prefixed_positionals)
         groups = collections.OrderedDict()
         for opt in self.options:
-            if opt.positional:
+            if opt.positional and not opt.prefix:
                 groups.setdefault(opt.positional, []).append(opt)
 
         # merge all the options under the same argument to a single string
@@ -116,6 +130,21 @@ class ParsedManpage(BaseModel):
             groups[k] = "\n\n".join([p.text for p in ln])
 
         return groups
+
+    @property
+    def prefixed_positionals(self):
+        """ordered mapping of positional name -> (prefix, merged help text)
+        for positionals that declare a literal token prefix"""
+        groups = collections.OrderedDict()
+        for opt in self.options:
+            if opt.positional and opt.prefix:
+                groups.setdefault(opt.positional, []).append(opt)
+
+        merged = collections.OrderedDict()
+        for k, ln in groups.items():
+            merged[k] = (ln[0].prefix, "\n\n".join([p.text for p in ln]))
+
+        return merged
 
     def find_option(self, flag):
         for o_tmp in self.options:

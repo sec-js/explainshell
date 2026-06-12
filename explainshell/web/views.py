@@ -432,6 +432,7 @@ def explain_program(program, store, distro=None, release=None):
                 "long": o.long,
                 "has_argument": o.has_argument,
                 "positional": o.positional,
+                "prefix": o.prefix,
                 "nested_cmd": o.nested_cmd,
                 "meta": o.meta,
             }

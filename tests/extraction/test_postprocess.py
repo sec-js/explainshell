@@ -9,6 +9,7 @@ from explainshell.extraction.postprocess import (
     _subset_has_cross_reference,
     dedup_options,
     postprocess,
+    sanitize_option,
     sanity_check_line_spans,
 )
 from explainshell.models import Option
@@ -276,6 +277,34 @@ class TestSubsetCrossReference:
     def test_long_flag_standalone(self) -> None:
         opt = _opt("Identical to --sort.")
         assert _subset_has_cross_reference(opt, frozenset({"--sort"}))
+
+
+class TestSanitizeOption:
+    """Field-combination rules, including the positional prefix sigil."""
+
+    def test_prefix_kept_for_positional(self) -> None:
+        opt = Option(text="server", positional="server", prefix="@")
+        assert sanitize_option(opt).prefix == "@"
+
+    def test_prefix_cleared_without_positional(self) -> None:
+        opt = Option(text="desc", short=["-a"], prefix="@")
+        assert sanitize_option(opt).prefix is None
+
+    def test_prefix_cleared_when_positional_cleared(self) -> None:
+        """clearing positional (flags present) also drops the prefix"""
+        opt = Option(text="desc", short=["-a"], positional="server", prefix="@")
+        result = sanitize_option(opt)
+        assert result.positional is None
+        assert result.prefix is None
+
+    def test_prefix_outside_allowlist_dropped(self) -> None:
+        for bad in ("<", "=", "%", "user@", "@@"):
+            opt = Option(text="f", positional="FILE", prefix=bad)
+            assert sanitize_option(opt).prefix is None
+
+    def test_clean_option_returned_unchanged(self) -> None:
+        opt = Option(text="server", positional="server", prefix="@")
+        assert sanitize_option(opt) is opt
 
 
 class TestPostprocessDedupIntegration:

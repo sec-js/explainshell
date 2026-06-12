@@ -107,6 +107,82 @@ class test_matcher(unittest.TestCase):
 
         self.assertMatchSingle(cmd, s.find_man_page("withmultipos")[0], matchedresult)
 
+    def test_prefixed_positional_out_of_order(self):
+        """a prefixed token claims its positional regardless of position, and
+        non-prefixed tokens skip the prefixed positional in ordered consumption"""
+        cmd = "withprefixpos ns foo.bar @8.8.8.8"
+        matchedresult = [
+            MR(0, 13, "withprefixpos synopsis", "withprefixpos"),
+            MR(14, 16, "name of the resource record", "ns"),
+            MR(17, 24, "query type", "foo.bar"),
+            MR(25, 33, "server to query", "@8.8.8.8"),
+        ]
+
+        self.assertMatchSingle(cmd, s.find_man_page("withprefixpos")[0], matchedresult)
+
+    def test_prefixed_positional_first(self):
+        """a prefixed token in first position doesn't consume the ordered pool"""
+        cmd = "withprefixpos @8.8.8.8 foo.bar"
+        matchedresult = [
+            MR(0, 13, "withprefixpos synopsis", "withprefixpos"),
+            MR(14, 22, "server to query", "@8.8.8.8"),
+            MR(23, 30, "name of the resource record", "foo.bar"),
+        ]
+
+        self.assertMatchSingle(cmd, s.find_man_page("withprefixpos")[0], matchedresult)
+
+    def test_prefixed_positional_reuse(self):
+        """multiple prefixed tokens may claim the same positional (adjacent
+        matches with the same text get merged)"""
+        cmd = "withprefixpos @a @b"
+        matchedresult = [
+            MR(0, 13, "withprefixpos synopsis", "withprefixpos"),
+            MR(14, 19, "server to query", "@a @b"),
+        ]
+
+        self.assertMatchSingle(cmd, s.find_man_page("withprefixpos")[0], matchedresult)
+
+    def test_prefixed_token_no_declared_prefix(self):
+        """a token bearing a sigil no positional declares falls through to
+        ordered consumption"""
+        cmd = "withmultipos @x"
+        matchedresult = [
+            MR(0, 12, "withmultipos synopsis", "withmultipos"),
+            MR(13, 15, "source file(s) to copy", "@x"),
+        ]
+
+        self.assertMatchSingle(cmd, s.find_man_page("withmultipos")[0], matchedresult)
+
+    def test_prefixed_positional_literal_name(self):
+        """a word spelling a prefixed positional's name no longer exact-name
+        matches it; it falls to ordered consumption (deliberate behavior delta)"""
+        cmd = "withprefixpos server"
+        matchedresult = [
+            MR(0, 13, "withprefixpos synopsis", "withprefixpos"),
+            MR(14, 20, "name of the resource record", "server"),
+        ]
+
+        self.assertMatchSingle(cmd, s.find_man_page("withprefixpos")[0], matchedresult)
+
+    def test_only_prefixed_positional(self):
+        """a page whose only positional is prefixed: prefix token matches,
+        non-prefix token goes unknown instead of raising on the empty pool"""
+        cmd = "onlyprefixpos :1"
+        matchedresult = [
+            MR(0, 13, "onlyprefixpos synopsis", "onlyprefixpos"),
+            MR(14, 16, "display to use", ":1"),
+        ]
+
+        self.assertMatchSingle(cmd, s.find_man_page("onlyprefixpos")[0], matchedresult)
+
+        cmd = "onlyprefixpos foo"
+        matchedresult = [
+            MR(0, 13, "onlyprefixpos synopsis", "onlyprefixpos"),
+            MR(14, 17, None, "foo"),
+        ]
+
+        self.assertMatchSingle(cmd, s.find_man_page("onlyprefixpos")[0], matchedresult)
+
     def test_reset_current_option_if_argument_taken(self):
         cmd = "withargs -ab12 arg"
         matchedresult = [

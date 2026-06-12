@@ -203,6 +203,63 @@ def create_test_store() -> Store:
         _ROFF_RAW,
     )
 
+    # dig-like page: a prefixed positional ('@server') plus ordered ones.
+    prefixpos_opts = [
+        Option(
+            text="server to query",
+            short=[],
+            long=[],
+            has_argument=False,
+            positional="server",
+            prefix="@",
+        ),
+        Option(
+            text="name of the resource record",
+            short=[],
+            long=[],
+            has_argument=False,
+            positional="name",
+        ),
+        Option(
+            text="query type",
+            short=[],
+            long=[],
+            has_argument=False,
+            positional="type",
+        ),
+    ]
+    store.add_manpage(
+        ParsedManpage(
+            source="ubuntu/26.04/1/withprefixpos.1.gz",
+            name="withprefixpos",
+            synopsis="withprefixpos synopsis",
+            options=prefixpos_opts,
+            aliases=[("withprefixpos", 10)],
+        ),
+        _ROFF_RAW,
+    )
+
+    # page whose ONLY positional is prefix-bearing.
+    store.add_manpage(
+        ParsedManpage(
+            source="ubuntu/26.04/1/onlyprefixpos.1.gz",
+            name="onlyprefixpos",
+            synopsis="onlyprefixpos synopsis",
+            options=[
+                Option(
+                    text="display to use",
+                    short=[],
+                    long=[],
+                    has_argument=False,
+                    positional="display",
+                    prefix=":",
+                )
+            ],
+            aliases=[("onlyprefixpos", 10)],
+        ),
+        _ROFF_RAW,
+    )
+
     return store
 
 

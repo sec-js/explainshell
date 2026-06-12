@@ -5,6 +5,7 @@
 
 manpages/ubuntu/26.04/1/avrdude.1.gz
 manpages/ubuntu/26.04/1/curl.1.gz
+manpages/ubuntu/26.04/1/dig.1.gz
 manpages/ubuntu/26.04/1/docker.1.gz
 manpages/ubuntu/26.04/1/echo.1.gz
 manpages/ubuntu/26.04/1/find.1.gz

@@ -22,10 +22,10 @@ _MP_FIELDS = (
 )
 
 # Per-option fields to compare in diff mode.
-_OPT_FIELDS = ("has_argument", "positional", "nested_cmd", "text")
+_OPT_FIELDS = ("has_argument", "positional", "prefix", "nested_cmd", "text")
 
 # Fields where None and False should be treated as equivalent.
-_FALSY_EQUIVALENT = {"nested_cmd", "positional"}
+_FALSY_EQUIVALENT = {"nested_cmd", "positional", "prefix"}
 
 # ANSI color helpers.
 _RED = "\033[31m"

@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 
 from explainshell.errors import ExtractionError, FailureReason
-from explainshell.models import Option
+from explainshell.models import OPTION_PREFIX_SIGILS, Option
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +34,12 @@ def sanitize_option(opt: Option) -> Option:
     """Fix universally-invalid field combinations.
 
     - positional + flags: clear positional
+    - prefix without positional: clear prefix
+    - prefix outside the sigil allowlist: clear prefix
     - nested_cmd without has_argument: set has_argument = True
     """
     positional = opt.positional
+    prefix = opt.prefix
     has_argument = opt.has_argument
     changed = False
 
@@ -50,6 +53,20 @@ def sanitize_option(opt: Option) -> Option:
         positional = None
         changed = True
 
+    if prefix and not positional:
+        logger.debug("clearing prefix=%r on non-positional option", prefix)
+        prefix = None
+        changed = True
+
+    if prefix and prefix not in OPTION_PREFIX_SIGILS:
+        logger.debug(
+            "dropping prefix=%r on positional %r: not in sigil allowlist",
+            prefix,
+            positional,
+        )
+        prefix = None
+        changed = True
+
     if opt.nested_cmd and not has_argument:
         has_argument = True
         changed = True
@@ -57,14 +74,12 @@ def sanitize_option(opt: Option) -> Option:
     if not changed:
         return opt
 
-    return Option(
-        text=opt.text,
-        short=opt.short,
-        long=opt.long,
-        has_argument=has_argument,
-        positional=positional,
-        nested_cmd=opt.nested_cmd,
-        meta=opt.meta,
+    return opt.model_copy(
+        update={
+            "has_argument": has_argument,
+            "positional": positional,
+            "prefix": prefix,
+        }
     )
 
 
@@ -73,15 +88,7 @@ def strip_trailing_blanks(opt: Option) -> Option:
     stripped = opt.text.rstrip("\n ")
     if stripped == opt.text:
         return opt
-    return Option(
-        text=stripped,
-        short=opt.short,
-        long=opt.long,
-        has_argument=opt.has_argument,
-        positional=opt.positional,
-        nested_cmd=opt.nested_cmd,
-        meta=opt.meta,
-    )
+    return opt.model_copy(update={"text": stripped})
 
 
 def _subset_has_cross_reference(subset: Option, extra_flags: frozenset[str]) -> bool:
@@ -179,14 +186,8 @@ def dedup_options(options: list[Option]) -> tuple[list[Option], int]:
             sup = options[best_j]
             sub = options[i]
             if len(sub.text) > len(sup.text):
-                options[best_j] = Option(
-                    text=sub.text,
-                    short=sup.short,
-                    long=sup.long,
-                    has_argument=sup.has_argument,
-                    positional=sup.positional,
-                    nested_cmd=sup.nested_cmd,
-                    meta=sub.meta,
+                options[best_j] = sup.model_copy(
+                    update={"text": sub.text, "meta": sub.meta}
                 )
             removed.add(i)
 

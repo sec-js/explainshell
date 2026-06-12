@@ -28,6 +28,11 @@ JSON schema:
       "positional": null,        // name string for positional operands with no flags (e.g.
                                  // "FILE"). NEVER set this if the option has short or long
                                  // flags. Omit if null.
+      "prefix": null,            // literal sigil character the SYNOPSIS attaches to this
+                                 // positional operand (e.g. "@" in dig's "[@server]").
+                                 // Only valid together with "positional". Do NOT use for
+                                 // optional sub-components like "[user@]hostname" or for
+                                 // placeholder styling like "<FILE>". Omit if none.
       "nested_cmd": false,       // true only when the argument is itself a shell command
                                  // (e.g. find -exec CMD ;). Omit if false.
       "lines": [111, 115]        // [start, end] line range from the left margin, covering the

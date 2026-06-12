@@ -47,6 +47,30 @@ test('explain sample command', async ({ page }) => {
     await expect(svgPaths.first()).toBeAttached();
 });
 
+test('prefixed positional claims its operand (issue #361)', async ({
+    page,
+}) => {
+    await page.goto('/explain?cmd=dig+ns+foo.bar+%408.8.8.8&deterministic');
+    await page.waitForLoadState('networkidle');
+
+    // The @-token must link to dig's server operand, not an order-assigned one.
+    const serverSpan = page.locator('#command span', { hasText: '@8.8.8.8' });
+    await expect(serverSpan).toBeVisible();
+    const helpref = await serverSpan.getAttribute('helpref');
+    expect(helpref).toBeTruthy();
+    const helpText = await page.locator(`#${helpref}`).textContent();
+    expect(helpText.toLowerCase()).toContain('server');
+
+    // ns/foo.bar consume the remaining positionals and must not share the
+    // @-token's help box.
+    const nsSpan = page.locator('#command span', { hasText: 'ns' }).first();
+    expect(await nsSpan.getAttribute('helpref')).not.toBe(helpref);
+
+    await expect(page).toHaveScreenshot('explain-dig-prefixed-positional.png', {
+        fullPage: true,
+    });
+});
+
 test('man page not found', async ({ page }) => {
     await page.goto('/explain?cmd=nonexistentcommand+--help');
     await page.waitForLoadState('networkidle');
@@ -336,10 +360,11 @@ test('unknown args show question mark circles', async ({ page }) => {
     await page.goto('/explain?cmd=grep+-Q+hello&deterministic');
     await page.waitForLoadState('networkidle');
 
-    // The unknown span should exist in #command
+    // The unknown span should exist in #command (hello matches grep's
+    // PATTERNS positional, so only -Q is unknown)
     const unknownSpan = page.locator('#command span.unknown');
     await expect(unknownSpan).toBeVisible();
-    await expect(unknownSpan).toHaveText('-Q hello');
+    await expect(unknownSpan).toHaveText('-Q');
     await expect(unknownSpan).toHaveAttribute(
         'title',
         /no matching help text/i,

@@ -10,7 +10,9 @@
         "includes": [
             "explainshell/web/static/js/es.js",
             "tests/**/*.js",
-            "playwright.config.js"
+            "playwright.config.js",
+            "!.claude",
+            "!tests/parse_conformance"
         ]
     },
     "formatter": {

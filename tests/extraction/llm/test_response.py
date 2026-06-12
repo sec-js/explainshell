@@ -239,6 +239,33 @@ class TestLlmOptionToStoreOption(unittest.TestCase):
         }
         opt = llm_option_to_store_option(raw, self.orig)
         self.assertEqual(opt.positional, "FILE")
+        self.assertIsNone(opt.prefix)
+
+    def test_positional_with_prefix(self):
+        raw = {
+            "short": [],
+            "long": [],
+            "has_argument": False,
+            "positional": "server",
+            "prefix": "@",
+            "lines": [10, 13],
+        }
+        opt = llm_option_to_store_option(raw, self.orig)
+        self.assertEqual(opt.positional, "server")
+        self.assertEqual(opt.prefix, "@")
+
+    def test_positional_with_embedded_sigil(self):
+        """sigil embedded in the positional name is split into prefix"""
+        raw = {
+            "short": [],
+            "long": [],
+            "has_argument": False,
+            "positional": "@server",
+            "lines": [10, 13],
+        }
+        opt = llm_option_to_store_option(raw, self.orig)
+        self.assertEqual(opt.positional, "server")
+        self.assertEqual(opt.prefix, "@")
 
 
 # ---------------------------------------------------------------------------
@@ -248,26 +275,55 @@ class TestLlmOptionToStoreOption(unittest.TestCase):
 
 class TestSanitizeOptionFields(unittest.TestCase):
     def test_argument_cleared_when_short_present(self):
-        short, long, ea, arg, nc = sanitize_option_fields(
+        short, long, ea, arg, nc, prefix = sanitize_option_fields(
             ["-D"], [], True, "debugopts", False
         )
         self.assertIsNone(arg)
 
     def test_argument_cleared_when_long_present(self):
-        short, long, ea, arg, nc = sanitize_option_fields(
+        short, long, ea, arg, nc, prefix = sanitize_option_fields(
             [], ["--type"], True, "c", False
         )
         self.assertIsNone(arg)
 
     def test_argument_kept_for_positional(self):
-        short, long, ea, arg, nc = sanitize_option_fields([], [], False, "FILE", False)
+        short, long, ea, arg, nc, prefix = sanitize_option_fields(
+            [], [], False, "FILE", False
+        )
         self.assertEqual(arg, "FILE")
 
     def test_nested_cmd_forces_has_argument(self):
-        short, long, ea, arg, nc = sanitize_option_fields(
+        short, long, ea, arg, nc, prefix = sanitize_option_fields(
             ["-exec"], [], False, None, True
         )
         self.assertTrue(ea)
+
+    def test_prefix_kept_for_positional(self):
+        short, long, ea, arg, nc, prefix = sanitize_option_fields(
+            [], [], False, "server", False, "@"
+        )
+        self.assertEqual(prefix, "@")
+
+    def test_prefix_cleared_without_positional(self):
+        short, long, ea, arg, nc, prefix = sanitize_option_fields(
+            ["-D"], [], True, None, False, "@"
+        )
+        self.assertIsNone(prefix)
+
+    def test_prefix_cleared_when_positional_cleared(self):
+        """positional cleared due to flags also drops the prefix"""
+        short, long, ea, arg, nc, prefix = sanitize_option_fields(
+            ["-D"], [], True, "server", False, "@"
+        )
+        self.assertIsNone(arg)
+        self.assertIsNone(prefix)
+
+    def test_prefix_outside_allowlist_dropped(self):
+        for bad in ("<", "=", "%", "user@", "@@"):
+            short, long, ea, arg, nc, prefix = sanitize_option_fields(
+                [], [], False, "FILE", False, bad
+            )
+            self.assertIsNone(prefix, f"prefix {bad!r} should have been dropped")
 
     def test_via_llm_option_to_store(self):
         """argument is cleared when passed through full conversion."""
@@ -386,6 +442,32 @@ class TestNormalizeOptionFields(unittest.TestCase):
         raw = {"has_argument": None}
         normalize_option_fields(raw)
         self.assertIsNone(raw["has_argument"])
+
+    def test_sigil_stripped_from_positional_name(self):
+        raw = {"positional": "@server"}
+        result = normalize_option_fields(raw)
+        self.assertEqual(result["positional"], "server")
+        self.assertEqual(result["prefix"], "@")
+
+    def test_sigil_not_stripped_when_prefix_present(self):
+        raw = {"positional": "@server", "prefix": "@"}
+        result = normalize_option_fields(raw)
+        self.assertEqual(result["positional"], "@server")
+        self.assertEqual(result["prefix"], "@")
+
+    def test_placeholder_styling_not_stripped(self):
+        """non-allowlisted leading chars like '<FILE>' stay untouched"""
+        raw = {"positional": "<FILE>"}
+        result = normalize_option_fields(raw)
+        self.assertEqual(result["positional"], "<FILE>")
+        self.assertNotIn("prefix", result)
+
+    def test_bare_sigil_positional_not_stripped(self):
+        """a positional that IS just the sigil isn't emptied out"""
+        raw = {"positional": "@"}
+        result = normalize_option_fields(raw)
+        self.assertEqual(result["positional"], "@")
+        self.assertNotIn("prefix", result)
 
 
 # ---------------------------------------------------------------------------

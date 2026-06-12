@@ -57,6 +57,7 @@ def _option_debug(option):
         "long": option.long,
         "has_argument": option.has_argument,
         "positional": option.positional,
+        "prefix": option.prefix,
         "nested_cmd": option.nested_cmd,
     }
 
@@ -667,13 +668,41 @@ class Matcher(bashlex.ast.nodevisitor):
                             self.matches.extend(m)
                             return
 
-                    if self.man_page.positionals:
+                    prefixed = self.man_page.prefixed_positionals
+                    if self.man_page.positionals or prefixed:
                         if self.man_page.nested_cmd:
                             logger.info("manpage %r can nest commands", self.man_page)
                             if self.startcommand(
                                 None, [node], self.man_page.nested_cmd, addgroup=False
                             ):
                                 self._current_option = None
+                                return
+
+                        # Prefix pool first: a token carrying a declared
+                        # sigil claims that positional, regardless of order.
+                        # Multiple prefixed tokens may claim the same
+                        # positional; first declaration in document order
+                        # wins when several share a prefix.
+                        for k, (prefix, text) in prefixed.items():
+                            if word.startswith(prefix):
+                                logger.info(
+                                    "word %r starts with prefix %r, using %r",
+                                    word,
+                                    prefix,
+                                    k,
+                                )
+                                mr = MatchResult(
+                                    node.pos[0],
+                                    node.pos[1],
+                                    text,
+                                    None,
+                                    {
+                                        "kind": "argument",
+                                        "positional": k,
+                                        "prefix": prefix,
+                                    },
+                                )
+                                self.matches.append(mr)
                                 return
 
                         d = self.man_page.positionals
@@ -689,22 +718,27 @@ class Matcher(bashlex.ast.nodevisitor):
                             # Ordered consumption: advance through positionals.
                             k = keys[group.positional_index]
                             group.positional_index += 1
-                        else:
+                        elif keys:
                             # All positionals consumed; reuse the last
                             # (variadic).
                             k = keys[-1]
+                        else:
+                            # Every positional is prefix-bearing and this
+                            # token carries none of the prefixes.
+                            k = None
 
-                        logger.info("got arguments, using %r", k)
-                        text = d[k]
-                        mr = MatchResult(
-                            node.pos[0],
-                            node.pos[1],
-                            text,
-                            None,
-                            {"kind": "argument", "positional": k},
-                        )
-                        self.matches.append(mr)
-                        return
+                        if k is not None:
+                            logger.info("got arguments, using %r", k)
+                            text = d[k]
+                            mr = MatchResult(
+                                node.pos[0],
+                                node.pos[1],
+                                text,
+                                None,
+                                {"kind": "argument", "positional": k},
+                            )
+                            self.matches.append(mr)
+                            return
 
                     # if all of that failed, we can't explain it so mark it unknown
                     self.matches.append(self.unknown(word, node.pos[0], node.pos[1]))
