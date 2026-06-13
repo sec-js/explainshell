@@ -55,8 +55,7 @@ def _make_classifier(
     s: _FakeStore,
     *,
     overwrite: bool = False,
-    filter_mode: str | None = None,
-    filter_model: str | None = None,
+    filter_specs: list[tuple[str, str | None]] | None = None,
     small_only: bool = False,
     large_only: bool = False,
     threshold: int = 2048,
@@ -65,8 +64,7 @@ def _make_classifier(
     return Classifier(
         s=s,  # type: ignore[arg-type]
         overwrite=overwrite,
-        filter_mode=filter_mode,
-        filter_model=filter_model,
+        filter_specs=filter_specs or [],
         small_only=small_only,
         large_only=large_only,
         size_threshold=threshold,
@@ -175,17 +173,13 @@ class TestClassifyFilterDb(unittest.TestCase):
     @patch("explainshell.extraction.common.gz_sha256", return_value="h")
     def test_filter_match_returns_work(self, _h, _il) -> None:
         s = self._store_with_row("u/26.04/1/foo.1.gz", "openai/old")
-        c = _make_classifier(
-            s, overwrite=True, filter_mode="llm", filter_model="openai/old"
-        )
+        c = _make_classifier(s, overwrite=True, filter_specs=[("llm", "openai/old")])
         self.assertIsInstance(c.classify("/x/u/26.04/1/foo.1.gz"), Work)
 
     @patch("os.path.islink", return_value=False)
     def test_filter_no_match_returns_filter_skip(self, _il) -> None:
         s = self._store_with_row("u/26.04/1/foo.1.gz", "openai/other")
-        c = _make_classifier(
-            s, overwrite=True, filter_mode="llm", filter_model="openai/old"
-        )
+        c = _make_classifier(s, overwrite=True, filter_specs=[("llm", "openai/old")])
         d = c.classify("/x/u/26.04/1/foo.1.gz")
         self.assertIsInstance(d, FilterSkip)
         assert isinstance(d, FilterSkip)
@@ -199,9 +193,7 @@ class TestClassifyFilterDb(unittest.TestCase):
         # not ContentDup, because the matching row's parsed data must be
         # refreshed end-to-end.
         s = self._store_with_row("u/26.04/1/foo.1.gz", "openai/old")
-        c = _make_classifier(
-            s, overwrite=True, filter_mode="llm", filter_model="openai/old"
-        )
+        c = _make_classifier(s, overwrite=True, filter_specs=[("llm", "openai/old")])
         self.assertIsInstance(c.classify("/x/u/26.04/1/foo.1.gz"), Work)
         # Sibling has same hash, same release, but is not in the DB at all.
         self.assertIsInstance(c.classify("/x/u/26.04/1/sibling.1.gz"), Work)
@@ -210,9 +202,7 @@ class TestClassifyFilterDb(unittest.TestCase):
     @patch("explainshell.extraction.common.gz_sha256", return_value="hash-Y")
     def test_filter_skip_does_not_seed_dedup(self, _h, _il) -> None:
         s = self._store_with_row("u/26.04/1/foo.1.gz", "openai/other")
-        c = _make_classifier(
-            s, overwrite=True, filter_mode="llm", filter_model="openai/old"
-        )
+        c = _make_classifier(s, overwrite=True, filter_specs=[("llm", "openai/old")])
         self.assertIsInstance(c.classify("/x/u/26.04/1/foo.1.gz"), FilterSkip)
         # Sibling with same hash should not alias onto the filter-skipped row.
         self.assertIsInstance(c.classify("/x/u/26.04/1/sibling.1.gz"), Work)
@@ -224,10 +214,31 @@ class TestClassifyFilterDb(unittest.TestCase):
         s = _FakeStore(
             extractor_info={"u/26.04/1/other.1.gz": ("llm", ExtractionMeta(model="x"))}
         )
+        c = _make_classifier(s, overwrite=True, filter_specs=[("llm", "openai/old")])
+        self.assertIsInstance(c.classify("/x/u/26.04/1/foo.1.gz"), Work)
+
+    @patch("os.path.islink", return_value=False)
+    @patch("explainshell.extraction.common.gz_sha256", return_value="h")
+    def test_filter_matches_any_of_multiple_specs(self, _h, _il) -> None:
+        # A row whose model matches the second spec is still queued as Work.
+        s = self._store_with_row("u/26.04/1/foo.1.gz", "openai/two")
         c = _make_classifier(
-            s, overwrite=True, filter_mode="llm", filter_model="openai/old"
+            s,
+            overwrite=True,
+            filter_specs=[("llm", "openai/one"), ("llm", "openai/two")],
         )
         self.assertIsInstance(c.classify("/x/u/26.04/1/foo.1.gz"), Work)
+
+    @patch("os.path.islink", return_value=False)
+    def test_filter_matches_none_of_multiple_specs(self, _il) -> None:
+        # A row matching none of the specs is filter-skipped.
+        s = self._store_with_row("u/26.04/1/foo.1.gz", "openai/three")
+        c = _make_classifier(
+            s,
+            overwrite=True,
+            filter_specs=[("llm", "openai/one"), ("llm", "openai/two")],
+        )
+        self.assertIsInstance(c.classify("/x/u/26.04/1/foo.1.gz"), FilterSkip)
 
 
 class TestClassifyAlreadyStored(unittest.TestCase):
@@ -302,7 +313,7 @@ class TestApplyDecisions(unittest.TestCase):
             ContentDup("/p/dup.gz", "u/26.04/1/dup.gz", "u/26.04/1/canon.gz"),
         ]
         s = _FakeStore()
-        out = apply_decisions(decisions, s, filter_db="llm:openai/old")  # type: ignore[arg-type]
+        out = apply_decisions(decisions, s, filter_db=("llm:openai/old",))  # type: ignore[arg-type]
         self.assertEqual(out.work_files, ["/p/work.gz"])
         self.assertEqual(
             out.content_dups, [("/p/dup.gz", "u/26.04/1/dup.gz", "u/26.04/1/canon.gz")]
@@ -324,7 +335,7 @@ class TestApplyDecisions(unittest.TestCase):
             ),
         ]
         s = _FakeStore(sources_in_db={"u/26.04/1/sym.gz"})
-        out = apply_decisions(decisions, s, filter_db=None)  # type: ignore[arg-type]
+        out = apply_decisions(decisions, s, filter_db=())  # type: ignore[arg-type]
         self.assertEqual(s.deleted, ["u/26.04/1/sym.gz"])
         self.assertEqual(
             out.symlinks,
@@ -342,11 +353,11 @@ class TestApplyDecisions(unittest.TestCase):
             ),
         ]
         s = _FakeStore()
-        apply_decisions(decisions, s, filter_db=None)  # type: ignore[arg-type]
+        apply_decisions(decisions, s, filter_db=())  # type: ignore[arg-type]
         self.assertEqual(s.deleted, [])
 
     def test_classified_defaults(self) -> None:
-        out = apply_decisions([], _FakeStore(), filter_db=None)  # type: ignore[arg-type]
+        out = apply_decisions([], _FakeStore(), filter_db=())  # type: ignore[arg-type]
         self.assertIsInstance(out, Classified)
         self.assertEqual(out.work_files, [])
         self.assertEqual(out.symlinks, [])

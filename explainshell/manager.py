@@ -295,8 +295,7 @@ def _run_plan(
     s: store.Store,
     *,
     overwrite: bool,
-    filter_mode: str | None,
-    filter_model: str | None,
+    filter_specs: list[tuple[str, str | None]],
     small_only: bool,
     large_only: bool,
 ) -> None:
@@ -304,8 +303,7 @@ def _run_plan(
     classifier = prefilter.Classifier(
         s=s,
         overwrite=overwrite,
-        filter_mode=filter_mode,
-        filter_model=filter_model,
+        filter_specs=filter_specs,
         small_only=small_only,
         large_only=large_only,
         size_threshold=_SIZE_FILTER_THRESHOLD,
@@ -532,10 +530,11 @@ def _require_db(ctx: click.Context, *, must_exist: bool = False) -> str:
 @click.option(
     "--filter-db",
     "filter_db",
-    default=None,
+    multiple=True,
     help=(
         "With --overwrite, only re-extract existing manpages whose DB row's "
-        "extractor matches <spec>. Same syntax as --mode."
+        "extractor matches <spec>. Same syntax as --mode. Repeatable: pass "
+        "multiple times to match any of several extractors/models."
     ),
 )
 @click.option(
@@ -589,7 +588,7 @@ def extract(
     files: tuple[str, ...],
     dry_run: bool,
     overwrite: bool,
-    filter_db: str | None,
+    filter_db: tuple[str, ...],
     drop: bool,
     jobs: int,
     batch: int | None,
@@ -611,15 +610,15 @@ def extract(
     if drop and dry_run:
         raise click.UsageError("--drop and --dry-run are mutually exclusive")
 
-    filter_mode: str | None = None
-    filter_model: str | None = None
-    if filter_db is not None:
+    filter_specs: list[tuple[str, str | None]] = []
+    if filter_db:
         if not overwrite:
             raise click.UsageError("--filter-db requires --overwrite")
-        try:
-            filter_mode, filter_model = _parse_mode(filter_db)
-        except ValueError as e:
-            raise click.UsageError(f"--filter-db: {e}")
+        for spec in filter_db:
+            try:
+                filter_specs.append(_parse_mode(spec))
+            except ValueError as e:
+                raise click.UsageError(f"--filter-db: {e}")
 
     if batch is not None:
         if batch < 1:
@@ -658,8 +657,7 @@ def extract(
             gz_files,
             s,
             overwrite=overwrite,
-            filter_mode=filter_mode,
-            filter_model=filter_model,
+            filter_specs=filter_specs,
             small_only=small_only,
             large_only=large_only,
         )
@@ -686,8 +684,7 @@ def extract(
     classifier = prefilter.Classifier(
         s=s,
         overwrite=overwrite,
-        filter_mode=filter_mode,
-        filter_model=filter_model,
+        filter_specs=filter_specs,
         small_only=small_only,
         large_only=large_only,
         size_threshold=_SIZE_FILTER_THRESHOLD,
@@ -854,7 +851,7 @@ def extract(
             mode=parsed_mode,
             model=model,
             overwrite=overwrite,
-            filter_db=filter_db,
+            filter_db=list(filter_db),
             drop=drop,
             jobs=jobs,
             batch_size=batch,

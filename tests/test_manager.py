@@ -1335,6 +1335,76 @@ class TestFilterFlag(unittest.TestCase):
     @patch("explainshell.manager.make_extractor")
     @patch("explainshell.util.collect_gz_files")
     @patch("explainshell.manager.config.source_from_path")
+    def test_filter_db_repeatable_matches_any(
+        self,
+        mock_source,
+        mock_collect,
+        mock_make_ext,
+        mock_run,
+        _mock_sha,
+    ):
+        """Repeated --filter-db lets rows matching any of the specs through."""
+        with _temp_db() as db_path:
+            gz_files = [
+                "/fake/ubuntu/26.04/1/foo.1.gz",
+                "/fake/ubuntu/26.04/1/bar.1.gz",
+                "/fake/ubuntu/26.04/1/baz.1.gz",
+            ]
+            mock_collect.return_value = gz_files
+            mock_source.side_effect = lambda p: "/".join(p.split("/")[-4:])
+
+            pre = Store.create(db_path)
+            pre.add_manpage(
+                _make_manpage_with_extractor(
+                    "foo", "llm", {"model": "openai/gpt-5-mini"}
+                ),
+                _make_raw(),
+            )
+            pre.add_manpage(
+                _make_manpage_with_extractor(
+                    "bar", "llm", {"model": "azure/gpt-5-mini/medium"}
+                ),
+                _make_raw(),
+            )
+            pre.add_manpage(
+                _make_manpage_with_extractor("baz", "llm", {"model": "openai/gpt-5"}),
+                _make_raw(),
+            )
+            pre.close()
+
+            mock_make_ext.return_value = MagicMock()
+            mock_run.return_value = BatchResult()
+
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                [
+                    "--db",
+                    db_path,
+                    "extract",
+                    "--mode",
+                    "llm:openai/new",
+                    "--overwrite",
+                    "--filter-db",
+                    "llm:openai/gpt-5-mini",
+                    "--filter-db",
+                    "llm:azure/gpt-5-mini/medium",
+                    "/fake/file.gz",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            (_, call_files), _ = mock_run.call_args
+            self.assertEqual(
+                sorted(p.split("/")[-1] for p in call_files),
+                ["bar.1.gz", "foo.1.gz"],
+            )
+
+    @patch("explainshell.extraction.common.gz_sha256", side_effect=lambda p: p)
+    @patch("explainshell.manager.run")
+    @patch("explainshell.manager.make_extractor")
+    @patch("explainshell.util.collect_gz_files")
+    @patch("explainshell.manager.config.source_from_path")
     def test_filter_db_lets_new_files_through(
         self,
         mock_source,

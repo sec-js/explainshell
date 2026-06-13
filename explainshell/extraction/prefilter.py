@@ -88,24 +88,29 @@ def _dedup_key(sha: str, source: str) -> str:
 
 
 def _matches_filter(
-    filter_mode: str,
-    filter_model: str | None,
+    filter_specs: list[tuple[str, str | None]],
     stored_extractor: str,
     stored_meta: models.ExtractionMeta,
 ) -> bool:
-    if not stored_extractor or filter_mode != stored_extractor:
+    """True if the stored row matches any of the (mode, model) filter specs."""
+    if not stored_extractor:
         return False
-    if filter_mode == "llm":
-        return stored_meta.model == filter_model
-    return True
+    for filter_mode, filter_model in filter_specs:
+        if filter_mode != stored_extractor:
+            continue
+        if filter_mode == "llm":
+            if stored_meta.model == filter_model:
+                return True
+            continue
+        return True
+    return False
 
 
 @dataclass
 class Classifier:
     s: store.Store
     overwrite: bool
-    filter_mode: str | None
-    filter_model: str | None
+    filter_specs: list[tuple[str, str | None]]
     small_only: bool
     large_only: bool
     size_threshold: int
@@ -122,7 +127,7 @@ class Classifier:
         if not self.overwrite:
             for sha, source in self.s.known_sha256s().items():
                 self._hash_to_canonical[_dedup_key(sha, source)] = source
-        if self.filter_mode is not None:
+        if self.filter_specs:
             self._filter_index = self.s.extractor_info_index()
 
     def classify(self, gz_path: str) -> Decision:
@@ -147,13 +152,12 @@ class Classifier:
                     canonical_in_inputs=canonical_path in self.normalized_inputs,
                 )
 
-        if self.overwrite and self.filter_mode is not None:
+        if self.overwrite and self.filter_specs:
             existing = self._filter_index.get(short_path)
             if existing is not None:
                 stored_extractor, stored_meta = existing
                 if _matches_filter(
-                    self.filter_mode,
-                    self.filter_model,
+                    self.filter_specs,
                     stored_extractor,
                     stored_meta,
                 ):
@@ -202,7 +206,7 @@ def apply_decisions(
     decisions: list[Decision],
     s: store.Store,
     *,
-    filter_db: str | None,
+    filter_db: tuple[str, ...] = (),
 ) -> Classified:
     """Apply DB cleanup and per-file logging; bucket decisions for the caller."""
     out = Classified()
@@ -230,7 +234,7 @@ def apply_decisions(
                 d.short_path,
                 d.stored_extractor,
                 d.stored_model,
-                filter_db,
+                ", ".join(filter_db),
             )
             out.prefilter_skipped += 1
         elif isinstance(d, Symlink):
